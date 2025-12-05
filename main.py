@@ -2,6 +2,7 @@
 
 from runner_torch import runner_torch
 from runner_scorch import runner_scorch
+from runner_tf import runner_tf
 import sys
 
 def main() -> None:
@@ -13,6 +14,10 @@ def main() -> None:
 
     print("\n=== runner_scorch ===")
     runner_scorch()
+    
+    print("\n=== runner_tf ===")
+    runner_tf()
+    
 
 
 if __name__ == "__main__":

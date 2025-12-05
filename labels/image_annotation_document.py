@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-
 from labels.data_label_collection import DataLabelCollection
-
 
 class ImageAnnotationDocument:
     """

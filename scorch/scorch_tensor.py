@@ -58,7 +58,7 @@ class ScorchTensor:
             data = np.stack([r, g, b], axis=0)           # C=3,H,W
 
         return cls(data=data.astype(np.float32), name=name, role=role)
-
+    
     @classmethod
     def from_bitmap_crop(
         cls,
@@ -79,10 +79,9 @@ class ScorchTensor:
             x=x,
             y=y,
             width=width,
-            height=height,
-            include_oob=False,
-        )
+            height=height)
         return cls.from_bitmap(cropped, name=name, role=role, grayscale=grayscale)
+    
 
     # ===============================================================
     # Init hook
@@ -114,6 +113,14 @@ class ScorchTensor:
     @property
     def ndim(self):
         return self.data.ndim
+    
+
+    def clone(self) -> "ScorchTensor":
+        return ScorchTensor(self.data.copy(), name=self.name, role=self.role)
+
+    def flatten(self) -> "ScorchTensor":
+        c, h, w = self.data.shape
+        return ScorchTensor(self.data.reshape(1, c * h * w), name=self.name, role=self.role)
 
     # ===============================================================
     # Framework Export

@@ -38,7 +38,6 @@ class DataLoader:
         self.images_subdir = images_subdir or annotations_subdir
 
         # --- Discover annotation files ---
-        # NOTE: Adjust args to match your real FileIO.get_all_files_local signature.
         all_files: List[Path] = FileIO.get_all_files_local(
             subdirectory=self.annotations_subdir
         )

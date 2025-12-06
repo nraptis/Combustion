@@ -4,11 +4,6 @@ class RGBA:
 
     __slots__ = ("_r", "_g", "_b", "_a")
 
-    # Rec.601 luma coefficients (sRGB-ish)
-    LUMA_R = 0.299
-    LUMA_G = 0.587
-    LUMA_B = 0.114
-
     def __init__(self, r: int, g: int, b: int, a: int = 255):
         self._r = self._clamp_int(r)
         self._g = self._clamp_int(g)
@@ -101,22 +96,14 @@ class RGBA:
     # ------------------------------
     @classmethod
     def luma_from_rgb(cls, r, g, b) -> float:
-        """
-        Compute luma (Y) using Rec.601 coefficients.
-        Returns a float in [0, 255] if r,g,b are in [0,255].
-        """
         return (
-            cls.LUMA_R * r
-            + cls.LUMA_G * g
-            + cls.LUMA_B * b
+            0.299 * r
+            + 0.587 * g
+            + 0.114 * b
         )
-
+    
     def to_gray(self) -> int:
-        """
-        Convert this RGBA color to an 8-bit grayscale luma value (0–255).
-        Alpha is ignored.
-        """
-        gray = RGBA.LUMA_R * self._r + RGBA.LUMA_G * self._g + RGBA.LUMA_B * self._g
+        gray = 0.299 * self._r + 0.587 * self._g + 0.114 * self._g
         return self._clamp_int(round(gray))
     
     def tuple(self):
@@ -147,28 +134,6 @@ class RGBA:
         out_r = src.rf * sa + dst.rf * (1.0 - sa)
         out_g = src.gf * sa + dst.gf * (1.0 - sa)
         out_b = src.bf * sa + dst.bf * (1.0 - sa)
-
-        return RGBA(
-            int(out_r * 255),
-            int(out_g * 255),
-            int(out_b * 255),
-            int(out_a * 255),
-        )
-
-    @staticmethod
-    def blend_premultiplied(src: "RGBA", dst: "RGBA") -> "RGBA":
-        """
-        Premultiplied alpha:
-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-        Assumes src.rgb is already premultiplied by src.a.
-        """
-        sa = src.af
-        da = dst.af
-
-        out_a = sa + da * (1.0 - sa)
-        out_r = src.rf + dst.rf * (1.0 - sa)
-        out_g = src.gf + dst.gf * (1.0 - sa)
-        out_b = src.bf + dst.bf * (1.0 - sa)
 
         return RGBA(
             int(out_r * 255),

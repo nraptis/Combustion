@@ -308,23 +308,7 @@ class Bitmap:
                 src_px = glyph.rgba[gx][gy]
                 dst_px = self.rgba[dx][dy]
                 self.rgba[dx][dy] = RGBA.blend_alpha(src_px, dst_px)
-
-    # --------------------------------------------------
-    # Stamp with premultiplied alpha
-    # --------------------------------------------------
-    def stamp_premultiplied(self, glyph: "Bitmap", x: int, y: int) -> None:
-        bounds = self._compute_stamp_bounds(glyph, x, y)
-        if bounds is None:
-            return
-        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
-        for dy in range(start_dy, end_dy):
-            gy = start_gy + (dy - start_dy)
-            for dx in range(start_dx, end_dx):
-                gx = start_gx + (dx - start_dx)
-                src_px = glyph.rgba[gx][gy]
-                dst_px = self.rgba[dx][dy]
-                self.rgba[dx][dy] = RGBA.blend_premultiplied(src_px, dst_px)
-
+                
     # --------------------------------------------------
     # Stamp with additive blending
     # --------------------------------------------------
@@ -350,87 +334,31 @@ class Bitmap:
         x: int,
         y: int,
         width: int,
-        height: int,
-        include_oob: bool = True,
-        oob_color: RGBA = RGBA(0, 0, 0, 255),
-    ) -> "Bitmap":
-        """
-        Crop a rectangular region from this bitmap.
-
-        (x, y) is the top-left of the requested region in this bitmap's
-        coordinate space.
-
-        If include_oob is False (default):
-            - The returned bitmap contains ONLY the overlapping region
-                between the requested rectangle and this bitmap.
-            - The result size may be smaller than (width, height).
-            - If there is no overlap, an empty bitmap (0x0) is returned.
-
-        If include_oob is True:
-            - The returned bitmap is ALWAYS (width x height) *if* this bitmap
-                is non-empty and width/height > 0.
-            - Any area of the requested region that lies outside this
-                bitmap is filled with `oob_color`.
-        """
+        height: int) -> "Bitmap":
         x = int(x)
         y = int(y)
         width = int(width)
         height = int(height)
-
-        # If requested size is degenerate OR the source is empty,
-        # always return an empty bitmap, regardless of include_oob.
-        if width <= 0 or height <= 0:
+        if width <= 0 or height <= 0 or self.width <= 0 or self.height <= 0:
             return Bitmap()
-
-        # --------------------------------------------------
-        # Branch 1: include_oob == True  (padded crop)
-        # --------------------------------------------------
-        if include_oob:
-            # Fixed-size crop, padded with oob_color where source is out-of-bounds.
-            result = Bitmap(width, height)
-            result.flood(oob_color)
-            result.stamp(self, -x, -y)
-            return result
-
-        # --------------------------------------------------
-        # Branch 2: include_oob == False  (overlap-only crop)
-        # --------------------------------------------------
-        # Here we adapt the _compute_stamp_bounds logic, but in "reverse":
-        # imagine a destination of size (width, height), and stamping `self`
-        # into it at (-x, -y). The overlapping region determines the crop.
-
-        if self.width <= 0 or self.height <= 0:
-            return Bitmap()
-
-        gw, gh = self.width, self.height  # glyph (source = self)
-        dw, dh = width, height            # destination (the requested rect)
+        gw, gh = self.width, self.height
+        dw, dh = width, height
         x_offset = -x
         y_offset = -y
-
-        # This mirrors _compute_stamp_bounds:
         start_dx = max(x_offset, 0)
         start_dy = max(y_offset, 0)
         end_dx = min(x_offset + gw, dw)
         end_dy = min(y_offset + gh, dh)
-
         if start_dx >= end_dx or start_dy >= end_dy:
-            # No overlap at all
             return Bitmap()
-
-        # Map destination overlap back to source coordinates
-        start_gx = start_dx - x_offset  # = start_dx + x
-        start_gy = start_dy - y_offset  # = start_dy + y
-
+        start_gx = start_dx - x_offset
+        start_gy = start_dy - y_offset
         crop_w = end_dx - start_dx
         crop_h = end_dy - start_dy
-
         result = Bitmap(crop_w, crop_h)
-
-        # Copy pixels from source (self) into the result.
         for dy in range(crop_h):
             sy = start_gy + dy
             for dx in range(crop_w):
                 sx = start_gx + dx
                 result.rgba[dx][dy] = self.rgba[sx][sy]
-
         return result

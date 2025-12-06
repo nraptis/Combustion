@@ -110,7 +110,7 @@ def runner_scorch_eval():
     # Need in_channels = 1 (we trained grayscale), so hard-code for now.
     in_channels = 1
     model = SmallConvNet(in_channels, num_classes).to(device)
-    state_dict = torch.load("hello_torch.pth", map_location=device)
+    state_dict = torch.load("hello_torch_2.pth", map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 

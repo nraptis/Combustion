@@ -21,8 +21,8 @@ def main() -> None:
     #print("\n=== runner_tf ===")
     #runner_tf()
     
-    runner_scorch_train()
-    # runner_scorch_eval()
+    #runner_scorch_train()
+    runner_scorch_eval()
     
 
 

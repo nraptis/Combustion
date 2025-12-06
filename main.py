@@ -9,14 +9,14 @@ def main() -> None:
 
     print(sys.executable)
 
-    print("=== runner_torch ===")
-    runner_torch()
+    #print("=== runner_torch ===")
+    #runner_torch()
 
     print("\n=== runner_scorch ===")
     runner_scorch()
     
-    print("\n=== runner_tf ===")
-    runner_tf()
+    #print("\n=== runner_tf ===")
+    #runner_tf()
     
 
 

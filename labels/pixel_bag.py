@@ -59,6 +59,19 @@ class PixelBag:
         if not self._set:
             return None
         return max(py for (_, py) in self._set)
+    
+    @property
+    def frame(self):
+        if not self._set:
+            return (0, 0, 0, 0)
+
+        xr = self.xrange()
+        yr = self.yrange()
+        
+        width  = xr.stop - xr.start
+        height = yr.stop - yr.start
+
+        return (xr.start, yr.start, width, height)
 
     # --------------------------------------------------
     # Ranges for easy looping

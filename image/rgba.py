@@ -4,6 +4,11 @@ class RGBA:
 
     __slots__ = ("_r", "_g", "_b", "_a")
 
+    # Rec.601 luma coefficients (sRGB-ish)
+    LUMA_R = 0.299
+    LUMA_G = 0.587
+    LUMA_B = 0.114
+
     def __init__(self, r: int, g: int, b: int, a: int = 255):
         self._r = self._clamp_int(r)
         self._g = self._clamp_int(g)
@@ -91,9 +96,29 @@ class RGBA:
     def af(self, v):
         self._a = int(self._clamp_float(v) * 255)
 
-    # ------------------------------
+   # ------------------------------
     # Utility
     # ------------------------------
+    @classmethod
+    def luma_from_rgb(cls, r, g, b) -> float:
+        """
+        Compute luma (Y) using Rec.601 coefficients.
+        Returns a float in [0, 255] if r,g,b are in [0,255].
+        """
+        return (
+            cls.LUMA_R * r
+            + cls.LUMA_G * g
+            + cls.LUMA_B * b
+        )
+
+    def to_gray(self) -> int:
+        """
+        Convert this RGBA color to an 8-bit grayscale luma value (0–255).
+        Alpha is ignored.
+        """
+        gray = RGBA.LUMA_R * self._r + RGBA.LUMA_G * self._g + RGBA.LUMA_B * self._g
+        return self._clamp_int(round(gray))
+    
     def tuple(self):
         return (self._r, self._g, self._b, self._a)
     

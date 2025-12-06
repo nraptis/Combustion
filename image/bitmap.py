@@ -1,12 +1,12 @@
 # bitmap.py
 
 from __future__ import annotations
+from typing import TYPE_CHECKING
 from typing import List
 import numpy as np
 from PIL import Image
 from image.rgba import RGBA
 from filesystem.file_utils import FileUtils
-
 
 # ----------------------------------------------------------------------
 # Bitmap: rgba[x][y] with OpenCV + Pillow interop
@@ -351,7 +351,7 @@ class Bitmap:
         y: int,
         width: int,
         height: int,
-        include_oob: bool = False,
+        include_oob: bool = True,
         oob_color: RGBA = RGBA(0, 0, 0, 255),
     ) -> "Bitmap":
         """

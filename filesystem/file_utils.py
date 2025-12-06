@@ -1,11 +1,16 @@
 # file_utils.py
 from __future__ import annotations
+from typing import TYPE_CHECKING
 
 from pathlib import Path
 from typing import Optional
 
 from filesystem.file_io import FileIO
 from PIL import Image
+
+if TYPE_CHECKING:
+    # Only imported for type checkers / IDEs, not at runtime
+    from image.bitmap import Bitmap
 
 class FileUtils:
 
@@ -45,11 +50,22 @@ class FileUtils:
         img = Image.open(path)
         img.load()
         return img
+    
+    @classmethod
+    def load_bitmap(cls, file_path: Path) -> Bitmap:
+        image = cls.load_image(file_path)
+        bitmap = Bitmap()
+        bitmap.import_pillow(image)
 
     @classmethod
     def load_local_image(cls, subdirectory: Optional[str], name: str, extension="png") -> Image.Image:
         path = FileIO.local_file(subdirectory, name, extension)
         return cls.load_image(path)
+    
+    @classmethod
+    def load_local_bitmap(cls, subdirectory: Optional[str], name: str, extension="png") -> Bitmap:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.load_bitmap(path)
 
     @classmethod
     def save_image(cls, image: Image.Image, file_path: Path) -> Path:
@@ -62,3 +78,8 @@ class FileUtils:
     def save_local_image(cls, image: Image.Image, subdirectory: Optional[str], name: str, extension="png") -> Path:
         path = FileIO.local_file(subdirectory, name, extension)
         return cls.save_image(image, path)
+    
+    @classmethod
+    def save_local_bitmap(cls, bitmap: Optional[Bitmap], subdirectory: Optional[str], name: str, extension="png") -> Path:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.save_image(bitmap.export_pillow(), path)

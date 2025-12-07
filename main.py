@@ -9,6 +9,8 @@ from runner_scorch_eval import runner_scorch_eval
 from runner_tf import runner_tf
 from runner_small_tensor_test import runner_small_tensor_test
 from runner_scorch_new import runner_scorch_new
+from runner_scorch_deep_eval import runner_scorch_deep_eval
+from runner_torch_dirty_train import runner_torch_dirty_train
 
 import sys
 
@@ -33,7 +35,13 @@ def main() -> None:
     # mask = (x_arr > 0).astype(np.float32)
     # print(mask)
 
-    runner_scorch_new()
+    # runner_scorch_new()
+    # runner_scorch_deep_eval()
+
+    runner_torch_dirty_train()
+
+
+
 
     
 

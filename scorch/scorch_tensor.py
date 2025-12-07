@@ -193,3 +193,14 @@ class ScorchTensor:
                     px.ai = 255
 
         return bmp
+    
+    def to_image(self):
+        """
+        Convert this ScorchTensor directly to a Pillow Image.
+
+        Internally:
+        - Uses to_bitmap() to rebuild a Bitmap
+        - Then calls Bitmap.export_pillow() to get a Pillow Image
+        """
+        bmp = self.to_bitmap()
+        return bmp.export_pillow()

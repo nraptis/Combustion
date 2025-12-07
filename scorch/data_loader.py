@@ -65,7 +65,7 @@ class DataLoader:
             except AnnotationLoadError as e:
                 print(f"[DataLoader] Skipping corrupt file: {annotation_path}\n  {e}")
                 continue  # skip but keep going
-        self.class_names = list(class_names)
+        self.class_names = sorted(list(class_names))
 
     def __len__(self) -> int:
         return len(self.annotation_files)

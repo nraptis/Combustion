@@ -8,6 +8,7 @@ from runner_scorch_eval import runner_scorch_eval
 
 from runner_tf import runner_tf
 from runner_small_tensor_test import runner_small_tensor_test
+from runner_scorch_new import runner_scorch_new
 
 import sys
 
@@ -27,15 +28,13 @@ def main() -> None:
     #runner_scorch_train()
     #runner_scorch_eval()
 
-    runner_small_tensor_test()
+    # runner_small_tensor_test()
+    # x_arr = np.array([-3.0, -1.2, 0.0, 0.5, 2.3], dtype=np.float32)
+    # mask = (x_arr > 0).astype(np.float32)
+    # print(mask)
 
-    
+    runner_scorch_new()
 
-    x_arr = np.array([-3.0, -1.2, 0.0, 0.5, 2.3], dtype=np.float32)
-
-    mask = (x_arr > 0).astype(np.float32)
-
-    print(mask)
     
 
 

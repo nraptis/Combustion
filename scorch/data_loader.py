@@ -47,26 +47,32 @@ class DataLoader:
             f for f in all_files
             if f.suffix == ".json" and f.name.endswith("_annotations.json")
         )
+        
+        seen = set()
+        self.documents = []
+        class_names = set()
+        for annotation_path in self.annotation_files:
+            try:
+                document = load_annotation_document(annotation_path)
+                name = document.name
+                if name in seen:
+                    print("DUPE NAME??? ", name)
+                    continue
+                seen.add(name)
+                self.documents.append(document)
+                for label_name in document.data_label_names:
+                    class_names.add(label_name)
+            except AnnotationLoadError as e:
+                print(f"[DataLoader] Skipping corrupt file: {annotation_path}\n  {e}")
+                continue  # skip but keep going
+        self.class_names = list(class_names)
 
     def __len__(self) -> int:
         return len(self.annotation_files)
 
     def __iter__(self):
-        seen = set()
-
-        for ann_path in self.annotation_files:
-            try:
-                doc = load_annotation_document(ann_path)
-            except AnnotationLoadError as e:
-                print(f"[DataLoader] Skipping corrupt file: {ann_path}\n  {e}")
-                continue  # skip but keep going
-
-            name = doc.name
-
-            if name in seen:
-                print("DUPE NAME??? ", name)
-                continue
-            seen.add(name)
+        for document in self.documents:
+            name = document.name
 
             # build image path
             img_rel = Path(self.images_subdir) / f"{name}.png"
@@ -76,5 +82,5 @@ class DataLoader:
                 print(f"[DataLoader] Missing PNG for '{name}', skipping.")
                 continue
 
-            yield AnnotationImagePair(document=doc, image_path=img_path)
+            yield AnnotationImagePair(document=document, image_path=img_path)
 

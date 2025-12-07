@@ -21,8 +21,9 @@ def linear_forward(x: np.ndarray, W: np.ndarray, b: np.ndarray) -> np.ndarray:
     returns: (C,)
     """
 
-    # return W @ x + b
+    #return W @ x + b
 
+    
     C = W.shape[0]   # number of output neurons
     D = W.shape[1]   # number of input features
 
@@ -40,6 +41,7 @@ def linear_forward(x: np.ndarray, W: np.ndarray, b: np.ndarray) -> np.ndarray:
         z[i] = acc
 
     return np.array(z, dtype=np.float32)
+
 
 def softmax_cross_entropy(logits: np.ndarray, target_index: int) -> float:
     """

@@ -24,14 +24,14 @@ from scorch.scorch_tensor import ScorchTensor
 # Config
 # ================================================================
 
-FIXED_WIDTH = 128
-FIXED_HEIGHT = 128
+FIXED_WIDTH = 92
+FIXED_HEIGHT = 92
 
 # multi-scale shrink range: 1.0 = original size, 0.5 = shrink to 50%
 MIN_SCALE = 0.50
 MAX_SCALE = 1.00  # don't enlarge beyond base canvas for now
 
-EPOCHS = 256
+EPOCHS = 160
 LR = 1e-3
 LAMBDA_MASK = 1.0  # weight for segmentation loss
 

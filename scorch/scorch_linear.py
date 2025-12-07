@@ -12,11 +12,18 @@ class ScorchLinear(ScorchModule):
     A minimal fully-connected layer:
         y = W @ x + b
 
-    This is a proper ScorchModule:
-        - forward() defined
-        - backward() will be added later
-        - parameters() returns [W, b]
-        - zero_grad() resets gradient buffers
+    Shapes:
+        x: (D,)
+        W: (C, D)
+        b: (C,)
+        y: (C,)
+
+    Backward:
+        grad_output: dL/dy, shape (C,)
+        Produces:
+            grad_W: dL/dW, shape (C, D)
+            grad_b: dL/db, shape (C,)
+            grad_input: dL/dx, shape (D,)
     """
 
     def __init__(self, in_features: int, out_features: int, name: str | None = None):
@@ -25,9 +32,7 @@ class ScorchLinear(ScorchModule):
         self.out_features = int(out_features)
         self.name = name or f"ScorchLinear({in_features}->{out_features})"
 
-        # --------------------------------------------------
-        # Parameter initialization (Xavier-like)
-        # --------------------------------------------------
+        # Parameter initialization (Xavier-ish)
         limit = 1.0 / math.sqrt(self.in_features)
         self.W = np.random.uniform(
             -limit, +limit,
@@ -36,11 +41,11 @@ class ScorchLinear(ScorchModule):
 
         self.b = np.zeros((self.out_features,), dtype=np.float32)
 
-        # Gradients (filled during backward pass)
+        # Gradients
         self.grad_W = np.zeros_like(self.W)
         self.grad_b = np.zeros_like(self.b)
 
-        # Cache for backward (save input x)
+        # Cache for backward
         self._last_x: np.ndarray | None = None
 
     # ------------------------------------------------------
@@ -61,24 +66,81 @@ class ScorchLinear(ScorchModule):
                 f"{self.name}: Expected {self.in_features} features, got {x_arr.shape[0]}"
             )
 
-        # Save for backward pass
+        # Save for backward
         self._last_x = x_arr.copy()
 
         return linear_forward(x_arr, self.W, self.b)
 
     # ------------------------------------------------------
-    # Backward pass (stub for now)
+    # Backward pass
     # ------------------------------------------------------
     def backward(self, grad_output):
         """
-        grad_output: np.ndarray of shape (out_features,)
-        Should compute:
-            grad_W
-            grad_b
-            grad_input
-        But we'll implement this later.
+        grad_output: dL/dy, shape (out_features,)
+
+        Computes:
+            grad_W (accumulated into self.grad_W)
+            grad_b (accumulated into self.grad_b)
+        Returns:
+            grad_input: dL/dx, shape (in_features,)
         """
-        raise NotImplementedError("ScorchLinear.backward is not implemented yet.")
+        if self._last_x is None:
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        g_out = np.asarray(grad_output, dtype=np.float32)
+
+        if g_out.shape != (self.out_features,):
+            raise ValueError(
+                f"{self.name}: grad_output shape {g_out.shape} "
+                f"does not match (out_features,) = ({self.out_features},)"
+            )
+
+        x = self._last_x  # shape (D,)
+
+        D = self.in_features
+        C = self.out_features
+
+        # dL/dW = outer(grad_output, x)
+        # grad_W = np.outer(g_out, x)  # (C, D)
+
+        # grad_W is the rate of change in error loss with respect to weight.
+        # ...
+        # The derivative of the loss with respect to weight W[i,j].
+        # ...
+        # grad_W[i,j] ==> “How much would the total loss change if we
+        # nudged weight W[i,j] upward by a tiny amount?”
+
+        grad_W = np.zeros((C, D), dtype=np.float32)
+
+        for i in range(C):        # for each output neuron
+            for j in range(D):    # for each input feature
+                grad_W[i][j] = g_out[i] * x[j]
+
+        # dL/db = grad_output
+        grad_b = g_out  # (C,)
+
+        # dL/dx = W^T @ grad_output
+        # ...
+        # grad_input = Wᵀ @ g_out because each input
+        # feature receives error signals from every output
+        # neuron, scaled by the weight that connects them...
+        # and that weighted sum is a dot product.
+
+        # grad_input = self.W.T @ g_out  # (D,)
+
+        grad_input = np.zeros(D, dtype=np.float32)
+
+        for j in range(D):               # for each input feature x[j]
+            acc = 0.0
+            for i in range(C):           # sum over all output neurons
+                acc += self.W[i][j] * g_out[i]
+            grad_input[j] = acc
+
+        # Accumulate gradients (so multiple samples can add up)
+        self.grad_W += grad_W
+        self.grad_b += grad_b
+
+        return grad_input
 
     # ------------------------------------------------------
     # Parameter + gradient handling

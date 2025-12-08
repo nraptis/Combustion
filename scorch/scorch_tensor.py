@@ -48,7 +48,7 @@ class ScorchTensor:
         r = bgra[:, :, 2]
 
         if grayscale:
-            gray = RGBA.luma_from_rgb(r, g, b)     # H,W
+            gray = RGBA.to_gray(r, g, b)     # H,W
             gray /= 255.0                                # normalize
             data = gray[np.newaxis, :, :]                # C=1,H,W
         else:

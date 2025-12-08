@@ -11,6 +11,7 @@ from runner_small_tensor_test import runner_small_tensor_test
 from runner_scorch_new import runner_scorch_new
 from runner_scorch_deep_eval import runner_scorch_deep_eval
 from runner_torch_dirty_train import runner_torch_dirty_train
+import pandas as pd
 
 import sys
 
@@ -47,6 +48,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+
+    df = pd.read_csv("penguins_cleaned.csv")
+    print(df.head())
+
+    
 
 

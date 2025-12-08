@@ -95,7 +95,7 @@ class RGBA:
     # Utility
     # ------------------------------
     @classmethod
-    def luma_from_rgb(cls, r, g, b) -> float:
+    def to_gray(cls, r, g, b) -> float:
         return (
             0.299 * r
             + 0.587 * g

@@ -118,7 +118,7 @@ class DataLoader:
             except AnnotationLoadError as e:
                 print(f"[DataLoader] Skipping corrupt file: {annotation_path}\n  {e}")
                 continue  # skip but keep going
-        self.class_names = list(class_names)
+        self.class_names = sorted(list(class_names))
 
     def __len__(self) -> int:
         return len(self.annotation_files)
@@ -347,6 +347,580 @@ def softmax_cross_entropy(logits: np.ndarray, target_index: int) -> float:
 
 
 
+# ===== scorch_conv2d.py =====
+
+# scorch/scorch_conv2d.py
+from __future__ import annotations
+
+import numpy as np
+from scorch.scorch_module import ScorchModule
+
+
+class ScorchConv2d(ScorchModule):
+    """
+    Pure loop-based reference implementation of a 2D convolution.
+
+    Follows PyTorch semantics exactly:
+
+        input:   (N, C_in,  H_in,  W_in)
+        weight:  (C_out, C_in, K_h, K_w)
+        bias:    (C_out,)
+        output:  (N, C_out, H_out, W_out)
+
+    H_out, W_out computed using the standard formula:
+
+        H_out = floor((H_in + 2*pad_h - dilation_h*(K_h - 1) - 1) / stride_h + 1)
+        W_out = floor((W_in + 2*pad_w - dilation_w*(K_w - 1) - 1) / stride_w + 1)
+
+    All operations implemented via explicit nested python loops.
+    Ideal for debugging and correctness verification.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int | tuple[int, int],
+        stride: int | tuple[int, int] = 1,
+        padding: int | tuple[int, int] = 0,
+        dilation: int | tuple[int, int] = 1,
+        name: str | None = None,
+    ):
+        super().__init__()
+
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+
+        # Normalize kernel size
+        if isinstance(kernel_size, int):
+            self.k_h = self.k_w = kernel_size
+        else:
+            self.k_h, self.k_w = kernel_size
+
+        # Normalize stride
+        if isinstance(stride, int):
+            self.s_h = self.s_w = stride
+        else:
+            self.s_h, self.s_w = stride
+
+        # Normalize padding
+        if isinstance(padding, int):
+            self.p_h = self.p_w = padding
+        else:
+            self.p_h, self.p_w = padding
+
+        # Normalize dilation
+        if isinstance(dilation, int):
+            self.d_h = self.d_w = dilation
+        else:
+            self.d_h, self.d_w = dilation
+
+        self.name = name or (
+            f"ScorchConv2d(in={in_channels}, out={out_channels}, "
+            f"kernel=({self.k_h},{self.k_w}), stride=({self.s_h},{self.s_w}), "
+            f"padding=({self.p_h},{self.p_w}), dilation=({self.d_h},{self.d_w}))"
+        )
+
+        # ----------------------------------------------------------
+        # Parameter initialization (Kaiming-ish)
+        # W shape: (C_out, C_in, K_h, K_w)
+        # b shape: (C_out,)
+        # ----------------------------------------------------------
+        fan_in = self.in_channels * self.k_h * self.k_w
+        limit = 1.0 / np.sqrt(fan_in)
+
+        self.W = np.random.uniform(
+            -limit, +limit,
+            size=(self.out_channels, self.in_channels, self.k_h, self.k_w)
+        ).astype(np.float32)
+
+        self.b = np.zeros((self.out_channels,), dtype=np.float32)
+
+        # Gradient buffers
+        self.grad_W = np.zeros_like(self.W)
+        self.grad_b = np.zeros_like(self.b)
+
+        # Cache for backward
+        self._last_x = None
+        self._last_output_shape = None
+
+    # --------------------------------------------------------------
+    # Forward
+    # --------------------------------------------------------------
+    def forward(self, x):
+        """
+        x: np.ndarray (N, C_in, H_in, W_in)
+        returns: np.ndarray (N, C_out, H_out, W_out)
+        """
+        x = np.asarray(x, dtype=np.float32)
+
+        if x.ndim != 4:
+            raise ValueError(
+                f"{self.name}: Expected 4D input (N,C,H,W), got {x.shape}"
+            )
+
+        N, C_in, H_in, W_in = x.shape
+
+        if C_in != self.in_channels:
+            raise ValueError(
+                f"{self.name}: Expected {self.in_channels} input channels, "
+                f"got {C_in}"
+            )
+
+        # Compute output shape
+        H_out = ((H_in + 2*self.p_h - self.d_h*(self.k_h - 1) - 1)
+                 // self.s_h + 1)
+
+        W_out = ((W_in + 2*self.p_w - self.d_w*(self.k_w - 1) - 1)
+                 // self.s_w + 1)
+
+        # Allocate output
+        y = np.zeros((N, self.out_channels, H_out, W_out), dtype=np.float32)
+
+        # Pad the input
+        x_padded = np.pad(
+            x,
+            pad_width=(
+                (0, 0),     # batch
+                (0, 0),     # channels
+                (self.p_h, self.p_h),
+                (self.p_w, self.p_w),
+            ),
+            mode="constant",
+            constant_values=0.0,
+        )
+
+        # ----------------------------------------------------------
+        # Pure nested loops:
+        #   for each batch, each output channel,
+        #   each output pixel, each input channel,
+        #   each kernel element...
+        # ----------------------------------------------------------
+        for n in range(N):
+            for c_out in range(self.out_channels):
+                for oy in range(H_out):
+                    in_y_origin = oy * self.s_h
+                    for ox in range(W_out):
+                        in_x_origin = ox * self.s_w
+
+                        acc = self.b[c_out]
+
+                        for c_in in range(self.in_channels):
+                            for ky in range(self.k_h):
+                                iy = in_y_origin + ky * self.d_h
+                                for kx in range(self.k_w):
+                                    ix = in_x_origin + kx * self.d_w
+
+                                    acc += (
+                                        self.W[c_out, c_in, ky, kx] *
+                                        x_padded[n, c_in, iy, ix]
+                                    )
+
+                        y[n, c_out, oy, ox] = acc
+
+        # Save for backward
+        self._last_x = x
+        self._last_output_shape = (H_out, W_out)
+
+        return y
+
+    # --------------------------------------------------------------
+    # Backward
+    # --------------------------------------------------------------
+    def backward(self, grad_out):
+        """
+        grad_out: np.ndarray (N, C_out, H_out, W_out)
+        returns: grad_input (N, C_in, H_in, W_in)
+        """
+        if self._last_x is None:
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        x = self._last_x
+        N, C_in, H_in, W_in = x.shape
+        H_out, W_out = self._last_output_shape
+
+        grad_out = np.asarray(grad_out, dtype=np.float32)
+
+        # Allocate gradients
+        grad_x = np.zeros_like(x, dtype=np.float32)
+        self.grad_W.fill(0.0)
+        self.grad_b.fill(0.0)
+
+        # Pad x and grad_x so indexing aligns
+        x_pad = np.pad(
+            x,
+            ((0,0),(0,0),(self.p_h,self.p_h),(self.p_w,self.p_w)),
+            mode="constant",
+        )
+        grad_x_pad = np.zeros_like(x_pad, dtype=np.float32)
+
+        # --------------------------------------------------------------
+        # Compute gradients:
+        #   grad_b[c_out] += grad_out[:,c_out,:,:]
+        #   grad_W += x * grad_out
+        #   grad_x += W * grad_out
+        # --------------------------------------------------------------
+        for n in range(N):
+            for c_out in range(self.out_channels):
+                for oy in range(H_out):
+                    in_y_origin = oy * self.s_h
+                    for ox in range(W_out):
+                        in_x_origin = ox * self.s_w
+
+                        go = grad_out[n, c_out, oy, ox]
+
+                        # Bias gradient
+                        self.grad_b[c_out] += go
+
+                        # Weight + Input gradients
+                        for c_in in range(self.in_channels):
+                            for ky in range(self.k_h):
+                                iy = in_y_origin + ky * self.d_h
+                                for kx in range(self.k_w):
+                                    ix = in_x_origin + kx * self.d_w
+
+                                    # dL/dW
+                                    self.grad_W[c_out, c_in, ky, kx] += (
+                                        x_pad[n, c_in, iy, ix] * go
+                                    )
+
+                                    # dL/dx
+                                    grad_x_pad[n, c_in, iy, ix] += (
+                                        self.W[c_out, c_in, ky, kx] * go
+                                    )
+
+        # Remove padding from grad_x
+        grad_x = grad_x_pad[
+            :,
+            :,
+            self.p_h:self.p_h+H_in,
+            self.p_w:self.p_w+W_in,
+        ]
+
+        return grad_x
+
+    # --------------------------------------------------------------
+    # Parameter handling
+    # --------------------------------------------------------------
+    def parameters(self):
+        return [self.W, self.b]
+
+    def zero_grad(self):
+        self.grad_W.fill(0.0)
+        self.grad_b.fill(0.0)
+
+    def __repr__(self):
+        return self.name
+
+
+
+# ===== scorch_conv2d_fast.py =====
+
+# scorch/scorch_conv2d_fast.py
+from __future__ import annotations
+
+import numpy as np
+from scorch.scorch_module import ScorchModule
+
+
+def im2col(
+    x, 
+    k_h, k_w, 
+    s_h, s_w, 
+    p_h, p_w, 
+    d_h, d_w
+):
+    """
+    Convert (N, C, H, W) → (N, C*k_h*k_w, H_out*W_out) using im2col.
+    """
+
+    N, C, H, W = x.shape
+
+    H_out = ((H + 2*p_h - d_h*(k_h - 1) - 1) // s_h) + 1
+    W_out = ((W + 2*p_w - d_w*(k_w - 1) - 1) // s_w) + 1
+
+    # Pad input
+    x_padded = np.pad(
+        x,
+        pad_width=(
+            (0, 0),
+            (0, 0),
+            (p_h, p_h),
+            (p_w, p_w)
+        ),
+        mode="constant"
+    )
+
+    # Allocate output matrix
+    cols = np.zeros((N, C * k_h * k_w, H_out * W_out), dtype=np.float32)
+
+    out_col = 0
+    for oy in range(H_out):
+        in_y_origin = oy * s_h
+        for ox in range(W_out):
+            in_x_origin = ox * s_w
+
+            # Gather all kernel positions for this output pixel
+            patch_idx = 0
+            for c in range(C):
+                for ky in range(k_h):
+                    iy = in_y_origin + ky * d_h
+                    for kx in range(k_w):
+                        ix = in_x_origin + kx * d_w
+
+                        cols[:, patch_idx, out_col] = x_padded[:, c, iy, ix]
+                        patch_idx += 1
+
+            out_col += 1
+
+    return cols  # (N, C*k_h*k_w, H_out*W_out)
+
+
+def col2im(
+    cols, 
+    x_shape, 
+    k_h, k_w, 
+    s_h, s_w, 
+    p_h, p_w, 
+    d_h, d_w
+):
+    """
+    Inverse of im2col:
+    Convert (N, C*k_h*k_w, H_out*W_out) → (N, C, H, W)
+    by adding contributions back into padded input space.
+    """
+
+    N, C, H, W = x_shape
+
+    H_out = ((H + 2*p_h - d_h*(k_h - 1) - 1) // s_h) + 1
+    W_out = ((W + 2*p_w - d_w*(k_w - 1) - 1) // s_w) + 1
+
+    x_padded = np.zeros((N, C, H + 2*p_h, W + 2*p_w), dtype=np.float32)
+
+    out_col = 0
+    for oy in range(H_out):
+        in_y_origin = oy * s_h
+        for ox in range(W_out):
+            in_x_origin = ox * s_w
+
+            patch_idx = 0
+            for c in range(C):
+                for ky in range(k_h):
+                    iy = in_y_origin + ky * d_h
+                    for kx in range(k_w):
+                        ix = in_x_origin + kx * d_w
+
+                        x_padded[:, c, iy, ix] += cols[:, patch_idx, out_col]
+                        patch_idx += 1
+
+            out_col += 1
+
+    # Remove padding
+    return x_padded[:, :, p_h:p_h+H, p_w:p_w+W]
+
+
+class ScorchConv2dFast(ScorchModule):
+    """
+    High-performance im2col + matmul Conv2d.
+    Produces identical results to ScorchConv2d (nested loop version),
+    but runs dramatically faster.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int | tuple[int, int],
+        stride: int | tuple[int, int] = 1,
+        padding: int | tuple[int, int] = 0,
+        dilation: int | tuple[int, int] = 1,
+        name: str | None = None,
+    ):
+        super().__init__()
+
+        self.in_channels = int(in_channels)
+        self.out_channels = int(out_channels)
+
+        # Normalize kernel size
+        if isinstance(kernel_size, int):
+            self.k_h = self.k_w = kernel_size
+        else:
+            self.k_h, self.k_w = kernel_size
+
+        # Normalize stride
+        if isinstance(stride, int):
+            self.s_h = self.s_w = stride
+        else:
+            self.s_h, self.s_w = stride
+
+        # Normalize padding
+        if isinstance(padding, int):
+            self.p_h = self.p_w = padding
+        else:
+            self.p_h, self.p_w = padding
+
+        # Normalize dilation
+        if isinstance(dilation, int):
+            self.d_h = self.d_w = dilation
+        else:
+            self.d_h, self.d_w = dilation
+
+        self.name = name or (
+            f"ScorchConv2dFast(in={in_channels}, out={out_channels}, "
+            f"kernel=({self.k_h},{self.k_w}), stride=({self.s_h},{self.s_w}), "
+            f"padding=({self.p_h},{self.p_w}), dilation=({self.d_h},{self.d_w}))"
+        )
+
+        # Parameter initialization
+        fan_in = self.in_channels * self.k_h * self.k_w
+        limit = 1.0 / np.sqrt(fan_in)
+
+        self.W = np.random.uniform(
+            -limit, +limit,
+            size=(self.out_channels, self.in_channels, self.k_h, self.k_w)
+        ).astype(np.float32)
+
+        self.b = np.zeros((self.out_channels,), dtype=np.float32)
+
+        # Grad buffers
+        self.grad_W = np.zeros_like(self.W)
+        self.grad_b = np.zeros_like(self.b)
+
+        # Cache
+        self._last_cols = None
+        self._last_x_shape = None
+        self._H_out = None
+        self._W_out = None
+
+    # ----------------------------------------------------------
+    # Forward
+    # ----------------------------------------------------------
+    def forward(self, x):
+        x = np.asarray(x, dtype=np.float32)
+
+        if x.ndim != 4:
+            raise ValueError(
+                f"{self.name}: Expected 4D input (N,C,H,W), got {x.shape}"
+            )
+
+        N, C, H, W = x.shape
+
+        # Compute output dims
+        H_out = ((H + 2*self.p_h - self.d_h*(self.k_h - 1) - 1) // self.s_h) + 1
+        W_out = ((W + 2*self.p_w - self.d_w*(self.k_w - 1) - 1) // self.s_w) + 1
+
+        # Store shapes for backward
+        self._last_x_shape = (N, C, H, W)
+        self._H_out = H_out
+        self._W_out = W_out
+
+        # Convert input into column matrix
+        cols = im2col(
+            x,
+            self.k_h, self.k_w,
+            self.s_h, self.s_w,
+            self.p_h, self.p_w,
+            self.d_h, self.d_w
+        )  # (N, C*k_h*k_w, H_out*W_out)
+
+        self._last_cols = cols
+
+        # Reshape weights for matmul
+        W_mat = self.W.reshape(self.out_channels, -1)  # (C_out, C_in*k_h*k_w)
+
+        # Allocate output
+        y = np.zeros((N, self.out_channels, H_out, W_out), dtype=np.float32)
+
+        # For each batch:
+        for n in range(N):
+            # matmul: (C_out, K) @ (K, H_out*W_out)
+            y_n = W_mat @ cols[n] + self.b.reshape(-1, 1)
+            y[n] = y_n.reshape(self.out_channels, H_out, W_out)
+
+        return y
+
+    # ----------------------------------------------------------
+    # Backward
+    # ----------------------------------------------------------
+    def backward(self, grad_out):
+        """
+        grad_out: (N, C_out, H_out, W_out)
+        returns: grad_x of shape (N, C_in, H, W)
+        """
+        if self._last_cols is None:
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        cols = self._last_cols
+        N, C, H, W = self._last_x_shape
+        H_out = self._H_out
+        W_out = self._W_out
+
+        grad_out = np.asarray(grad_out, dtype=np.float32)
+
+        # Flatten grad_out for matmul
+        grad_out_2d = grad_out.reshape(N, self.out_channels, H_out * W_out)
+
+        # Reset grads
+        self.grad_W.fill(0.0)
+        self.grad_b.fill(0.0)
+
+        # For matmul shapes
+        W_mat = self.W.reshape(self.out_channels, -1)      # (C_out, K)
+        grad_W_mat = np.zeros_like(W_mat)                  # (C_out, K)
+
+        # Output gradients accumulate into params
+        for n in range(N):
+            go = grad_out_2d[n]   # (C_out, H_out*W_out)
+
+            # grad_b
+            self.grad_b += go.sum(axis=1)
+
+            # grad_W_mat += go @ cols[n].T
+            grad_W_mat += go @ cols[n].transpose(1, 0)
+
+        # Reshape grad_W back
+        self.grad_W = grad_W_mat.reshape(
+            self.out_channels, self.in_channels, self.k_h, self.k_w
+        )
+
+        # --------------------------------------------------
+        # Compute grad_x via W^T * grad_out, then col2im
+        # --------------------------------------------------
+        grad_cols = np.zeros_like(cols)
+
+        W_mat_T = W_mat.T  # (K, C_out)
+
+        for n in range(N):
+            go = grad_out_2d[n]       # (C_out, H_out*W_out)
+            grad_cols[n] = W_mat_T @ go   # (K, H_out*W_out)
+
+        # Convert column gradients back to image shape
+        grad_x = col2im(
+            grad_cols,
+            (N, C, H, W),
+            self.k_h, self.k_w,
+            self.s_h, self.s_w,
+            self.p_h, self.p_w,
+            self.d_h, self.d_w
+        )
+
+        return grad_x
+
+    # ----------------------------------------------------------
+    # Parameter handling
+    # ----------------------------------------------------------
+    def parameters(self):
+        return [self.W, self.b]
+
+    def zero_grad(self):
+        self.grad_W.fill(0.0)
+        self.grad_b.fill(0.0)
+
+    def __repr__(self):
+        return self.name
+
+
+
 # ===== scorch_dataset.py =====
 
 # scorch/scorch_dataset.py
@@ -441,18 +1015,28 @@ class ScorchLinear(ScorchModule):
     A minimal fully-connected layer:
         y = W @ x + b
 
-    Shapes:
-        x: (D,)
+    Shapes (conceptually):
+        Input features:  D = in_features
+        Output features: C = out_features
+
+    Forward:
+        x: (..., D)
         W: (C, D)
         b: (C,)
-        y: (C,)
+        y: (..., C)
+
+        That is:
+            - if x is 1-D, shape (D,), y is (C,)
+            - if x is 2-D, shape (N, D), y is (N, C)
+            - if x is 3-D, shape (B, T, D), y is (B, T, C)
+            - etc.
 
     Backward:
-        grad_output: dL/dy, shape (C,)
+        grad_output: dL/dy, same shape as y = (..., C)
         Produces:
             grad_W: dL/dW, shape (C, D)
             grad_b: dL/db, shape (C,)
-            grad_input: dL/dx, shape (D,)
+            grad_input: dL/dx, shape (..., D)
     """
 
     def __init__(self, in_features: int, out_features: int, name: str | None = None):
@@ -474,7 +1058,7 @@ class ScorchLinear(ScorchModule):
         self.grad_W = np.zeros_like(self.W)
         self.grad_b = np.zeros_like(self.b)
 
-        # Cache for backward
+        # Cache for backward: we need x with its full shape
         self._last_x: np.ndarray | None = None
 
     # ------------------------------------------------------
@@ -482,90 +1066,192 @@ class ScorchLinear(ScorchModule):
     # ------------------------------------------------------
     def forward(self, x):
         """
-        x: np.ndarray of shape (in_features,)
-        returns: np.ndarray of shape (out_features,)
+        x: np.ndarray of shape (..., in_features)
+        returns: np.ndarray of shape (..., out_features)
         """
         x_arr = np.asarray(x, dtype=np.float32)
 
-        if x_arr.ndim != 1:
-            raise ValueError(f"{self.name}: Expected input shape (D,), got {x_arr.shape}")
-
-        if x_arr.shape[0] != self.in_features:
+        if x_arr.ndim < 1:
             raise ValueError(
-                f"{self.name}: Expected {self.in_features} features, got {x_arr.shape[0]}"
+                f"{self.name}: Expected at least 1-D input (..., D), got {x_arr.shape}"
             )
 
-        # Save for backward
+        if x_arr.shape[-1] != self.in_features:
+            raise ValueError(
+                f"{self.name}: Expected last dimension {self.in_features}, "
+                f"got {x_arr.shape[-1]}"
+            )
+
+        # Save for backward (full shape, not flattened)
         self._last_x = x_arr.copy()
 
-        return linear_forward(x_arr, self.W, self.b)
+        # ------------------------------------------------------------------
+        # Conceptual NumPy one-liner (kept for reference)
+        #
+        #   out = x_arr @ self.W.T + self.b
+        #
+        # However, we expand this into manual Python loops so each multiply /
+        # add is explicit for learning and debugging.
+        # ------------------------------------------------------------------
+
+        # Handle the simple 1-D case (D,) directly via linear_forward:
+        if x_arr.ndim == 1:
+            # (Old behavior, still here and still readable)
+            # return self.W @ x_arr + self.b
+            return linear_forward(x_arr, self.W, self.b)
+
+        # General N-D case: (..., D)
+        original_shape = x_arr.shape          # (..., D)
+        leading_shape = original_shape[:-1]   # ...
+        D = self.in_features
+        C = self.out_features
+
+        # Flatten all leading dimensions into a single "batch" dimension.
+        batch_size = int(np.prod(leading_shape)) if leading_shape else 1
+
+        x_flat = x_arr.reshape(batch_size, D)            # (B, D)
+        out_flat = np.zeros((batch_size, C), dtype=np.float32)  # (B, C)
+
+        # Manual forward: for each sample n, and each output neuron i,
+        # compute dot(W[i, :], x[n, :]) + b[i]
+        for n in range(batch_size):          # each sample in the batch
+            for i in range(C):              # each output neuron
+                acc = 0.0
+                for j in range(D):          # each input feature
+                    acc += self.W[i, j] * x_flat[n, j]
+                acc += self.b[i]
+                out_flat[n, i] = acc
+
+        # Reshape back to (..., C)
+        out = out_flat.reshape(*leading_shape, C)
+        return out
 
     # ------------------------------------------------------
     # Backward pass
     # ------------------------------------------------------
     def backward(self, grad_output):
         """
-        grad_output: dL/dy, shape (out_features,)
+        grad_output: dL/dy, same shape as forward output (..., out_features)
 
         Computes:
-            grad_W (accumulated into self.grad_W)
-            grad_b (accumulated into self.grad_b)
+            grad_W (accumulated into self.grad_W)   shape (C, D)
+            grad_b (accumulated into self.grad_b)   shape (C,)
         Returns:
-            grad_input: dL/dx, shape (in_features,)
+            grad_input: dL/dx, shape (..., in_features)
         """
         if self._last_x is None:
             raise RuntimeError(f"{self.name}: backward called before forward.")
 
         g_out = np.asarray(grad_output, dtype=np.float32)
+        x = self._last_x
 
-        if g_out.shape != (self.out_features,):
+        if g_out.ndim < 1:
             raise ValueError(
-                f"{self.name}: grad_output shape {g_out.shape} "
+                f"{self.name}: grad_output must be at least 1-D (..., C), "
+                f"got {g_out.shape}"
+            )
+
+        if g_out.shape[-1] != self.out_features:
+            raise ValueError(
+                f"{self.name}: grad_output last dimension {g_out.shape[-1]} "
                 f"does not match (out_features,) = ({self.out_features},)"
             )
 
-        x = self._last_x  # shape (D,)
+        if x.shape[:-1] != g_out.shape[:-1]:
+            raise ValueError(
+                f"{self.name}: grad_output leading shape {g_out.shape[:-1]} "
+                f"does not match input leading shape {x.shape[:-1]}"
+            )
 
         D = self.in_features
         C = self.out_features
 
-        # dL/dW = outer(grad_output, x)
-        # grad_W = np.outer(g_out, x)  # (C, D)
+        # ------------------------------------------------------------------
+        # 1-D special case: keep it as close as possible to your old code
+        # ------------------------------------------------------------------
+        if x.ndim == 1 and g_out.ndim == 1:
+            # x: (D,)
+            # g_out: (C,)
 
-        # grad_W is the rate of change in error loss with respect to weight.
-        # ...
-        # The derivative of the loss with respect to weight W[i,j].
-        # ...
-        # grad_W[i,j] ==> “How much would the total loss change if we
-        # nudged weight W[i,j] upward by a tiny amount?”
+            # dL/dW = outer(grad_output, x)
+            # grad_W = np.outer(g_out, x)  # (C, D)
+
+            # grad_W is the rate of change in error loss with respect to weight.
+            # ...
+            # The derivative of the loss with respect to weight W[i,j].
+            # ...
+            # grad_W[i,j] ==> “How much would the total loss change if we
+            # nudged weight W[i,j] upward by a tiny amount?”
+
+            grad_W = np.zeros((C, D), dtype=np.float32)
+            for i in range(C):        # for each output neuron
+                for j in range(D):    # for each input feature
+                    grad_W[i][j] = g_out[i] * x[j]
+
+            # dL/db = grad_output
+            grad_b = g_out  # (C,)
+
+            # dL/dx = W^T @ grad_output
+            # ...
+            # grad_input = Wᵀ @ g_out because each input
+            # feature receives error signals from every output
+            # neuron, scaled by the weight that connects them...
+            # and that weighted sum is a dot product.
+
+            # grad_input = self.W.T @ g_out  # (D,)
+
+            grad_input = np.zeros(D, dtype=np.float32)
+            for j in range(D):               # for each input feature x[j]
+                acc = 0.0
+                for i in range(C):           # sum over all output neurons
+                    acc += self.W[i][j] * g_out[i]
+                grad_input[j] = acc
+
+            # Accumulate gradients (so multiple samples can add up)
+            self.grad_W += grad_W
+            self.grad_b += grad_b
+
+            return grad_input
+
+        # ------------------------------------------------------------------
+        # General N-D case: x shape (..., D), grad_output shape (..., C)
+        #
+        # We flatten to:
+        #   x_flat:       (B, D)
+        #   g_out_flat:   (B, C)
+        #
+        # Then:
+        #   grad_W[i,j] = Σ_n  g_out[n,i] * x[n,j]
+        #   grad_b[i]   = Σ_n  g_out[n,i]
+        #   grad_input[n,j] = Σ_i W[i,j] * g_out[n,i]
+        # ------------------------------------------------------------------
+        leading_shape = x.shape[:-1]
+        batch_size = int(np.prod(leading_shape)) if leading_shape else 1
+
+        x_flat = x.reshape(batch_size, D)            # (B, D)
+        g_out_flat = g_out.reshape(batch_size, C)    # (B, C)
 
         grad_W = np.zeros((C, D), dtype=np.float32)
+        grad_b = np.zeros((C,), dtype=np.float32)
+        grad_input_flat = np.zeros((batch_size, D), dtype=np.float32)
 
-        for i in range(C):        # for each output neuron
-            for j in range(D):    # for each input feature
-                grad_W[i][j] = g_out[i] * x[j]
+        # Manual accumulation over the batch and feature dimensions
+        for n in range(batch_size):       # each sample
+            for i in range(C):           # each output neuron
+                gi = g_out_flat[n, i]    # gradient flowing into neuron i
+                grad_b[i] += gi          # dL/db accumulates over batch
 
-        # dL/db = grad_output
-        grad_b = g_out  # (C,)
+                # grad_W[i,j] = Σ_n g[n,i] * x[n,j]
+                # grad_input[n,j] = Σ_i W[i,j] * g[n,i]
+                for j in range(D):
+                    xnj = x_flat[n, j]
+                    grad_W[i, j] += gi * xnj
+                    grad_input_flat[n, j] += self.W[i, j] * gi
 
-        # dL/dx = W^T @ grad_output
-        # ...
-        # grad_input = Wᵀ @ g_out because each input
-        # feature receives error signals from every output
-        # neuron, scaled by the weight that connects them...
-        # and that weighted sum is a dot product.
+        # Reshape grad_input back to (..., D)
+        grad_input = grad_input_flat.reshape(*leading_shape, D)
 
-        # grad_input = self.W.T @ g_out  # (D,)
-
-        grad_input = np.zeros(D, dtype=np.float32)
-
-        for j in range(D):               # for each input feature x[j]
-            acc = 0.0
-            for i in range(C):           # sum over all output neurons
-                acc += self.W[i][j] * g_out[i]
-            grad_input[j] = acc
-
-        # Accumulate gradients (so multiple samples can add up)
+        # Accumulate gradients (so multiple samples / batches can add up)
         self.grad_W += grad_W
         self.grad_b += grad_b
 
@@ -584,6 +1270,13 @@ class ScorchLinear(ScorchModule):
     def __repr__(self):
         return f"{self.name}(W={self.W.shape}, b={self.b.shape})"
 
+
+
+# ===== scorch_max_pool2d.py =====
+
+# scorch_max_pool2d.py
+
+#dead ChatGPT, let's make a perfect clone of this for our honorific framework.
 
 
 # ===== scorch_module.py =====
@@ -935,7 +1628,7 @@ class ScorchTensor:
         r = bgra[:, :, 2]
 
         if grayscale:
-            gray = RGBA.luma_from_rgb(r, g, b)     # H,W
+            gray = RGBA.to_gray(r, g, b)     # H,W
             gray /= 255.0                                # normalize
             data = gray[np.newaxis, :, :]                # C=1,H,W
         else:
@@ -1080,6 +1773,17 @@ class ScorchTensor:
                     px.ai = 255
 
         return bmp
+    
+    def to_image(self):
+        """
+        Convert this ScorchTensor directly to a Pillow Image.
+
+        Internally:
+        - Uses to_bitmap() to rebuild a Bitmap
+        - Then calls Bitmap.export_pillow() to get a Pillow Image
+        """
+        bmp = self.to_bitmap()
+        return bmp.export_pillow()
 
 
 
@@ -1129,7 +1833,60 @@ def mask_tensor_from_pixel_bag(
 
 
 # -------------------------------------------------------------------
-# Core: image + mask from PixelBag (one label)
+# Core: mask from PixelBag (fixed size, centered)
+# -------------------------------------------------------------------
+def mask_tensor_from_pixel_bag_fixed_size_centered(
+    bag: PixelBag,
+    fixed_width: int,
+    fixed_height: int,
+    name: str | None = None,
+) -> ScorchTensor:
+    """
+    Create a 1 x fixed_height x fixed_width mask tensor.
+
+    Steps:
+      - Build the tight mask cropped to PixelBag.frame (same as
+        mask_tensor_from_pixel_bag).
+      - Place that mask centered inside a larger canvas of size
+        (1, fixed_height, fixed_width).
+      - The rest is zeros.
+
+    Assumes that bag.frame width/height <= fixed_width / fixed_height.
+    """
+    x0, y0, w, h = bag.frame
+
+    if w == 0 or h == 0:
+        # Empty bag -> all zeros mask of requested size
+        mask = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
+        return ScorchTensor(mask, name=name, role="mask_fixed_size_centered")
+
+    if w > fixed_width or h > fixed_height:
+        raise ValueError(
+            f"mask_tensor_from_pixel_bag_fixed_size_centered: "
+            f"bag frame size ({w},{h}) exceeds fixed size "
+            f"({fixed_width},{fixed_height})"
+        )
+
+    # Local tight mask
+    tight = mask_tensor_from_pixel_bag(
+        bag=bag,
+        name=name,
+    )
+    tight_arr = tight.to_numpy()  # (1,h,w)
+
+    mask = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
+
+    # Center placement
+    dx = fixed_width // 2 - w // 2
+    dy = fixed_height // 2 - h // 2
+
+    mask[:, dy:dy + h, dx:dx + w] = tight_arr
+
+    return ScorchTensor(mask, name=name, role="mask_fixed_size_centered")
+
+
+# -------------------------------------------------------------------
+# Core: image + mask from PixelBag (one label, tight frame)
 # -------------------------------------------------------------------
 def image_and_mask_from_pixel_bag(
     bmp: Bitmap,
@@ -1184,6 +1941,108 @@ def image_and_mask_from_pixel_bag(
 
 
 # -------------------------------------------------------------------
+# Core: image + mask from PixelBag (fixed slab, centered)
+# -------------------------------------------------------------------
+def image_and_mask_from_pixel_bag_fixed_size_centered(
+    bmp: Bitmap,
+    bag: PixelBag,
+    fixed_width: int,
+    fixed_height: int,
+    name: str | None = None,
+    grayscale: bool = True,
+) -> Tuple[ScorchTensor, ScorchTensor]:
+    """
+    Return (image_patch_fixed_size_centered, mask_patch_fixed_size_centered)
+    for a single PixelBag.
+
+    Steps:
+      - Crop the bitmap to the PixelBag.frame (tight bounding box).
+      - Verify that the frame fits inside the requested fixed size.
+      - Create a new Bitmap(fixed_width, fixed_height).
+      - Center-stamp the cropped bitmap into the fixed-size bitmap using:
+            stamp_x = fixed_width  // 2 - w // 2
+            stamp_y = fixed_height // 2 - h // 2
+      - Build a matching fixed-size mask where the tight mask is
+        placed at the same centered location.
+
+    Result:
+      - image_patch_fixed_size_centered: ScorchTensor, (C, fixed_height, fixed_width)
+      - mask_patch_fixed_size_centered:  ScorchTensor, (1, fixed_height, fixed_width)
+    """
+    x0, y0, w, h = bag.frame
+
+    if w == 0 or h == 0:
+        # Empty bag -> just return all-zero tensors of the fixed size
+        img_arr = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
+        mask_arr = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
+        img_tensor = ScorchTensor(
+            img_arr,
+            name=f"{name}_img_fixed_size_centered" if name else None,
+            role="image_patch_fixed_size_centered",
+        )
+        mask_tensor = ScorchTensor(
+            mask_arr,
+            name=f"{name}_mask_fixed_size_centered" if name else None,
+            role="mask_fixed_size_centered",
+        )
+        return img_tensor, mask_tensor
+
+    if w > fixed_width or h > fixed_height:
+        raise ValueError(
+            f"image_and_mask_from_pixel_bag_fixed_size_centered: "
+            f"bag frame size ({w},{h}) exceeds fixed size "
+            f"({fixed_width},{fixed_height})"
+        )
+
+    # Defensive clamp to bitmap bounds, same as non-fixed helper
+    x0 = max(0, min(x0, bmp.width  - w))
+    y0 = max(0, min(y0, bmp.height - h))
+
+    # 1) Tight crop around the bag
+    cropped = bmp.crop(
+        x=x0,
+        y=y0,
+        width=w,
+        height=h,
+    )
+
+    # 2) New fixed-size bitmap and center stamp
+    padded = Bitmap(fixed_width, fixed_height)
+
+    stamp_x = fixed_width // 2 - cropped.width // 2
+    stamp_y = fixed_height // 2 - cropped.height // 2
+
+    padded.stamp(cropped, stamp_x, stamp_y)
+
+    # 3) Convert to ScorchTensor
+    img_tensor = ScorchTensor.from_bitmap(
+        bmp=padded,
+        name=f"{name}_img_fixed_size_centered" if name else None,
+        role="image_patch_fixed_size_centered",
+        grayscale=grayscale,
+    )
+
+    # 4) Matching fixed-size mask
+    mask_tensor = mask_tensor_from_pixel_bag_fixed_size_centered(
+        bag=bag,
+        fixed_width=fixed_width,
+        fixed_height=fixed_height,
+        name=f"{name}_mask_fixed_size_centered" if name else None,
+    )
+
+    # Final sanity check: shapes must match
+    _, h_m, w_m = mask_tensor.shape
+    _, h_i, w_i = img_tensor.shape
+    if (h_m, w_m) != (h_i, w_i):
+        raise ValueError(
+            f"Fixed-size mask/image size mismatch: "
+            f"mask=({h_m},{w_m}), image=({h_i},{w_i})"
+        )
+
+    return img_tensor, mask_tensor
+
+
+# -------------------------------------------------------------------
 # High-level: iterate (image_patch, mask_patch, label_name) over a pair
 # -------------------------------------------------------------------
 def iter_label_patches_from_pair(
@@ -1193,6 +2052,8 @@ def iter_label_patches_from_pair(
     """
     Yield (image_patch, mask_patch, label_name) for every label
     in a single AnnotationImagePair.
+
+    Uses the tight PixelBag.frame (no padding).
     """
     bmp = Bitmap.with_image(pair.image_path)
     doc = pair.document
@@ -1207,832 +2068,38 @@ def iter_label_patches_from_pair(
             grayscale=grayscale,
         )
         yield img_patch, mask_patch, label.name
-        
 
 
-# ========== ROOT: /Users/naraptis/Desktop/Combustion/image ==========
-
-# ===== bitmap.py =====
-
-# bitmap.py
-
-from __future__ import annotations
-from typing import TYPE_CHECKING
-from typing import List
-import numpy as np
-from PIL import Image
-from image.rgba import RGBA
-from filesystem.file_utils import FileUtils
-
-# ----------------------------------------------------------------------
-# Bitmap: rgba[x][y] with OpenCV + Pillow interop
-# ----------------------------------------------------------------------
-
-class Bitmap:
+# -------------------------------------------------------------------
+# High-level: iterate fixed-size centered patches over a pair
+# -------------------------------------------------------------------
+def iter_label_patches_from_pair_fixed_size_centered(
+    pair: AnnotationImagePair,
+    fixed_width: int,
+    fixed_height: int,
+    grayscale: bool = True,
+):
     """
-    Bitmap with:
-        - width, height
-        - pixels stored as rgba[x][y] where:
-            x = 0..width-1  (left to right)
-            y = 0..height-1 (top to bottom)
+    Yield (image_patch_fixed_size_centered, mask_patch_fixed_size_centered,
+    label_name) for every label in a single AnnotationImagePair.
+
+    Each patch is exactly (fixed_height, fixed_width) with the original
+    PixelBag.frame content centered in the slab.
     """
+    bmp = Bitmap.with_image(pair.image_path)
+    doc = pair.document
 
-    def __init__(self, width: int = 0, height: int = 0) -> None:
-        self.width: int = 0
-        self.height: int = 0
-        self.rgba: List[List[RGBA]] = []  # rgba[x][y]
-        if width > 0 and height > 0:
-            self.set_size(width, height)
-
-    # --------------------------------------------------
-    # The ONLY place we allocate the internal rgba array
-    # --------------------------------------------------
-    def set_size(self, width: int, height: int) -> None:
-        """
-        Resize the bitmap and allocate internal storage.
-        This is the ONLY place rgba[][] is allocated.
-        """
-        self.width = int(width)
-        self.height = int(height)
-
-        # rgba[x][y]
-        self.rgba = [
-            [RGBA(0, 0, 0, 255) for _y in range(self.height)]
-            for _x in range(self.width)
-        ]
-
-    # --------------------------------------------------
-    # Loading Methods: load via FileIO + import_pillow
-    # --------------------------------------------------
-    
-    @classmethod
-    def with_image(cls, file_path) -> "Bitmap":
-        """
-        Convenience constructor: create a Bitmap and load an image from
-        an explicit file path via FileIO.load_image.
-        """
-        bmp = cls()
-        bmp.load_image(file_path)
-        return bmp
-    
-    @classmethod
-    def with_local_image(
-        cls,
-        subdirectory: str | None = None,
-        name: str | None = None,
-        extension: str | None = None,
-    ) -> "Bitmap":
-        """
-        Convenience constructor: create a Bitmap and load an image using
-        FileIO.load_local_image (which uses FileIO.local for path building).
-        """
-        bmp = cls()
-        bmp.load_local_image(
-            subdirectory=subdirectory,
-            name=name,
-            extension=extension,
+    for label in doc.data.labels:
+        bag = label.pixel_bag
+        img_patch, mask_patch = image_and_mask_from_pixel_bag_fixed_size_centered(
+            bmp=bmp,
+            bag=bag,
+            fixed_width=fixed_width,
+            fixed_height=fixed_height,
+            name=label.name,
+            grayscale=grayscale,
         )
-        return bmp
-
-    def load_image(self, file_path):
-        """
-        Create a Bitmap from an explicit file path using FileIO.load_image.
-        """
-        image = FileUtils.load_image(file_path)
-        self.import_pillow(image)
-        return self  # optional, enables chaining
-
-    def load_local_image(
-        self,
-        subdirectory: str | None = None,
-        name: str | None = None,
-        extension: str | None = None,
-    ) -> "Bitmap":
-        """
-        Create a Bitmap using FileIO.load_local_image
-        (which uses FileIO.local for path building).
-        """
-        image = FileUtils.load_local_image(
-            subdirectory=subdirectory,
-            name=name,
-            extension=extension,
-        )
-        self.import_pillow(image)
-        return self  # optional, enables chaining
-
-    # --------------------------------------------------
-    # Import from OpenCV (NumPy array)
-    # --------------------------------------------------
-    def import_opencv(self, mat: np.ndarray) -> None:
-        """
-        Import from an OpenCV-style NumPy array.
-        Supports:
-            - H x W (grayscale)
-            - H x W x 3 (BGR)
-            - H x W x 4 (BGRA)
-        """
-        if mat is None:
-            raise ValueError("mat is None")
-
-        if mat.ndim == 2:
-            # Grayscale: shape = (H, W)
-            h, w = mat.shape
-            self.set_size(w, h)
-            for y in range(h):
-                for x in range(w):
-                    v = int(mat[y, x])
-                    self.rgba[x][y] = RGBA(v, v, v, 255)
-
-        elif mat.ndim == 3:
-            h, w, c = mat.shape
-            if c not in (3, 4):
-                raise ValueError(f"Unsupported channel count: {c}")
-
-            self.set_size(w, h)
-
-            if c == 3:
-                # BGR
-                for y in range(h):
-                    for x in range(w):
-                        b, g, r = mat[y, x]
-                        self.rgba[x][y] = RGBA(int(r), int(g), int(b), 255)
-            elif c == 4:
-                # BGRA
-                for y in range(h):
-                    for x in range(w):
-                        b, g, r, a = mat[y, x]
-                        self.rgba[x][y] = RGBA(int(r), int(g), int(b), int(a))
-
-        else:
-            raise ValueError(f"Unsupported mat.ndim = {mat.ndim}")
-
-    # --------------------------------------------------
-    # Import from Pillow Image
-    # --------------------------------------------------
-    def import_pillow(self, image: Image.Image) -> None:
-        """
-        Import from a Pillow Image.
-        Converts to RGBA first to simplify handling.
-        """
-        if image is None:
-            raise ValueError("image is None")
-
-        img = image.convert("RGBA")
-        w, h = img.size
-        self.set_size(w, h)
-
-        pixels = img.load()
-        for x in range(w):
-            for y in range(h):
-                r, g, b, a = pixels[x, y]
-                self.rgba[x][y] = RGBA(int(r), int(g), int(b), int(a))
-
-    # --------------------------------------------------
-    # Export to OpenCV (NumPy array)
-    # --------------------------------------------------
-    def export_opencv(self) -> np.ndarray:
-        """
-        Export to an OpenCV-style NumPy array (H x W x 4, BGRA).
-        Caller can convert to BGR if desired:
-            bgr = bgra[:, :, :3]
-        """
-        h = self.height
-        w = self.width
-        mat = np.zeros((h, w, 4), dtype=np.uint8)
-
-        for x in range(w):
-            for y in range(h):
-                px = self.rgba[x][y]
-                # OpenCV expects B, G, R, A
-                mat[y, x, 0] = px.bi
-                mat[y, x, 1] = px.gi
-                mat[y, x, 2] = px.ri
-                mat[y, x, 3] = px.ai
-
-        return mat
-
-    # --------------------------------------------------
-    # Export to Pillow Image
-    # --------------------------------------------------
-    def export_pillow(self) -> Image.Image:
-        """
-        Export to a Pillow RGBA Image.
-        """
-        img = Image.new("RGBA", (self.width, self.height))
-        pixels = img.load()
-
-        for x in range(self.width):
-            for y in range(self.height):
-                px = self.rgba[x][y]
-                pixels[x, y] = (px.ri, px.gi, px.bi, px.ai)
-
-        return img
-
-    # --------------------------------------------------
-    # Flood fill: set every pixel to the same RGBA color
-    # --------------------------------------------------
-    def flood(self, color: RGBA) -> None:
-        """
-        Set every pixel in this bitmap to the given RGBA color.
-
-        If the bitmap has zero width or height, this is a no-op.
-        """
-        if self.width <= 0 or self.height <= 0:
-            return
-
-        # Use the int components from the input color.
-        r = color.ri
-        g = color.gi
-        b = color.bi
-        a = color.ai
-
-        for x in range(self.width):
-            col = self.rgba[x]
-            for y in range(self.height):
-                px = col[y]
-                px.ri = r
-                px.gi = g
-                px.bi = b
-                px.ai = a
-
-
-    # --------------------------------------------------
-    # Internal helper: compute overlap for stamping
-    # --------------------------------------------------
-    def _compute_stamp_bounds(self, glyph: "Bitmap", x: int, y: int):
-        """
-        Compute the overlapping region between this bitmap (destination)
-        and the glyph bitmap (source), given that the glyph's top-left
-        should be placed at (x, y) in destination coordinates.
-
-        Returns:
-            (start_dx, end_dx, start_dy, end_dy, start_gx, start_gy)
-        or None if there is no overlap.
-        """
-        gw, gh = glyph.width, glyph.height
-        dw, dh = self.width, self.height
-        if gw <= 0 or gh <= 0 or dw <= 0 or dh <= 0:
-            return None
-        start_dx = max(x, 0)
-        start_dy = max(y, 0)
-        end_dx = min(x + gw, dw)
-        end_dy = min(y + gh, dh)
-        if start_dx >= end_dx or start_dy >= end_dy:
-            return None
-        start_gx = start_dx - x
-        start_gy = start_dy - y
-        return (start_dx, end_dx, start_dy, end_dy, start_gx, start_gy)
-
-    # --------------------------------------------------
-    # Stamp: overwrite pixels from glyph into this bitmap
-    # --------------------------------------------------
-    def stamp(self, glyph: "Bitmap", x: int, y: int) -> None:
-        """
-        Stamp `glyph` onto this bitmap so that glyph (0,0)
-        lands at destination (x,y).
-
-        For now, we simply REPLACE the destination pixels with
-        the glyph pixels (no alpha blending).
-
-        All edge/off-grid cases are handled gracefully:
-        - If the stamp is fully off-screen, nothing happens.
-        - If the stamp is partially off-screen, only the visible
-            part is drawn.
-        """
-        bounds = self._compute_stamp_bounds(glyph, x, y)
-        if bounds is None:
-            return
-        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
-        for dy in range(start_dy, end_dy):
-            gy = start_gy + (dy - start_dy)
-            for dx in range(start_dx, end_dx):
-                gx = start_gx + (dx - start_dx)
-                self.rgba[dx][dy] = glyph.rgba[gx][gy]
-
-    # --------------------------------------------------
-    # Stamp with classic alpha
-    # --------------------------------------------------
-    def stamp_alpha(self, glyph: "Bitmap", x: int, y: int) -> None:
-        bounds = self._compute_stamp_bounds(glyph, x, y)
-        if bounds is None:
-            return
-        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
-        for dy in range(start_dy, end_dy):
-            gy = start_gy + (dy - start_dy)
-            for dx in range(start_dx, end_dx):
-                gx = start_gx + (dx - start_dx)
-                src_px = glyph.rgba[gx][gy]
-                dst_px = self.rgba[dx][dy]
-                self.rgba[dx][dy] = RGBA.blend_alpha(src_px, dst_px)
-                
-    # --------------------------------------------------
-    # Stamp with additive blending
-    # --------------------------------------------------
-    def stamp_additive(self, glyph: "Bitmap", x: int, y: int) -> None:
-        bounds = self._compute_stamp_bounds(glyph, x, y)
-        if bounds is None:
-            return
-        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
-        for dy in range(start_dy, end_dy):
-            gy = start_gy + (dy - start_dy)
-            for dx in range(start_dx, end_dx):
-                gx = start_gx + (dx - start_dx)
-                src_px = glyph.rgba[gx][gy]
-                dst_px = self.rgba[dx][dy]
-                self.rgba[dx][dy] = RGBA.blend_additive(src_px, dst_px)
-
-
-    # --------------------------------------------------
-    # Crop a sub-rectangle into a new Bitmap
-    # --------------------------------------------------
-    def crop(
-        self,
-        x: int,
-        y: int,
-        width: int,
-        height: int) -> "Bitmap":
-        x = int(x)
-        y = int(y)
-        width = int(width)
-        height = int(height)
-        if width <= 0 or height <= 0 or self.width <= 0 or self.height <= 0:
-            return Bitmap()
-        gw, gh = self.width, self.height
-        dw, dh = width, height
-        x_offset = -x
-        y_offset = -y
-        start_dx = max(x_offset, 0)
-        start_dy = max(y_offset, 0)
-        end_dx = min(x_offset + gw, dw)
-        end_dy = min(y_offset + gh, dh)
-        if start_dx >= end_dx or start_dy >= end_dy:
-            return Bitmap()
-        start_gx = start_dx - x_offset
-        start_gy = start_dy - y_offset
-        crop_w = end_dx - start_dx
-        crop_h = end_dy - start_dy
-        result = Bitmap(crop_w, crop_h)
-        for dy in range(crop_h):
-            sy = start_gy + dy
-            for dx in range(crop_w):
-                sx = start_gx + dx
-                result.rgba[dx][dy] = self.rgba[sx][sy]
-        return result
-
-
-
-# ===== rgba.py =====
-
-# rgba.py
-
-class RGBA:
-
-    __slots__ = ("_r", "_g", "_b", "_a")
-
-    def __init__(self, r: int, g: int, b: int, a: int = 255):
-        self._r = self._clamp_int(r)
-        self._g = self._clamp_int(g)
-        self._b = self._clamp_int(b)
-        self._a = self._clamp_int(a)
-
-    # ------------------------------
-    # Helpers
-    # ------------------------------
-    @staticmethod
-    def _clamp_int(v):
-        return max(0, min(255, int(v)))
-
-    @staticmethod
-    def _clamp_float(v):
-        return max(0.0, min(1.0, float(v)))
-
-    # ------------------------------
-    # Integer accessors (0–255)
-    # ------------------------------
-    @property
-    def ri(self):
-        return self._r
-
-    @ri.setter
-    def ri(self, v):
-        self._r = self._clamp_int(v)
-
-    @property
-    def gi(self):
-        return self._g
-
-    @gi.setter
-    def gi(self, v):
-        self._g = self._clamp_int(v)
-
-    @property
-    def bi(self):
-        return self._b
-
-    @bi.setter
-    def bi(self, v):
-        self._b = self._clamp_int(v)
-
-    @property
-    def ai(self):
-        return self._a
-
-    @ai.setter
-    def ai(self, v):
-        self._a = self._clamp_int(v)
-
-    # ------------------------------
-    # Float accessors (0.0–1.0)
-    # ------------------------------
-    @property
-    def rf(self):
-        return self._r / 255.0
-
-    @rf.setter
-    def rf(self, v):
-        self._r = int(self._clamp_float(v) * 255)
-
-    @property
-    def gf(self):
-        return self._g / 255.0
-
-    @gf.setter
-    def gf(self, v):
-        self._g = int(self._clamp_float(v) * 255)
-
-    @property
-    def bf(self):
-        return self._b / 255.0
-
-    @bf.setter
-    def bf(self, v):
-        self._b = int(self._clamp_float(v) * 255)
-
-    @property
-    def af(self):
-        return self._a / 255.0
-
-    @af.setter
-    def af(self, v):
-        self._a = int(self._clamp_float(v) * 255)
-
-   # ------------------------------
-    # Utility
-    # ------------------------------
-    @classmethod
-    def luma_from_rgb(cls, r, g, b) -> float:
-        return (
-            0.299 * r
-            + 0.587 * g
-            + 0.114 * b
-        )
-    
-    def to_gray(self) -> int:
-        gray = 0.299 * self._r + 0.587 * self._g + 0.114 * self._g
-        return self._clamp_int(round(gray))
-    
-    def tuple(self):
-        return (self._r, self._g, self._b, self._a)
-    
-    def __str__(self):
-        return f"({self.rf:0.2f}, {self.gf:0.2f}, {self.bf:0.2f}, {self.af:0.2f})"
-
-    def __repr__(self):
-        return self.__str__()
-    
-    # ------------------------------
-    # Blending helpers (OpenGL-style)
-    # ------------------------------
-    @staticmethod
-    def blend_alpha(src: "RGBA", dst: "RGBA") -> "RGBA":
-        """
-        Classic alpha blending:
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        """
-        sa = src.af
-        da = dst.af
-
-        out_a = sa + da * (1.0 - sa)
-        if out_a == 0.0:
-            return RGBA(0, 0, 0, 0)
-
-        out_r = src.rf * sa + dst.rf * (1.0 - sa)
-        out_g = src.gf * sa + dst.gf * (1.0 - sa)
-        out_b = src.bf * sa + dst.bf * (1.0 - sa)
-
-        return RGBA(
-            int(out_r * 255),
-            int(out_g * 255),
-            int(out_b * 255),
-            int(out_a * 255),
-        )
-
-    @staticmethod
-    def blend_additive(src: "RGBA", dst: "RGBA") -> "RGBA":
-        """
-        Additive blending:
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-        """
-        sa = src.af
-        da = dst.af
-
-        out_a = min(1.0, sa + da)
-
-        out_r = src.rf * sa + dst.rf
-        out_g = src.gf * sa + dst.gf
-        out_b = src.bf * sa + dst.bf
-
-        # No manual clamp needed: RGBA(...) constructor clamps 0–255
-        return RGBA(
-            int(out_r * 255),
-            int(out_g * 255),
-            int(out_b * 255),
-            int(out_a * 255),
-        )
-
-
-# ========== ROOT: /Users/naraptis/Desktop/Combustion/filesystem ==========
-
-# ===== file_io.py =====
-
-# file_io.py
-
-from __future__ import annotations
-
-from pathlib import Path
-from typing import Union, List
-
-PathLike = Union[str, Path]
-
-class FileIO:
-
-    # ================================================================
-    # Path builders: directories + files
-    # ================================================================
-
-    @classmethod
-    def local_directory(cls, subdirectory: PathLike | None = None) -> Path:
-        """
-        Build a fully-qualified directory path inside the project root.
-        Strips any leading/trailing slashes.
-        """
-        project_root = Path(__file__).resolve().parent.parent
-
-        if subdirectory:
-            subdirectory = cls._strip_outer_slashes(str(subdirectory))
-            return (project_root / subdirectory).resolve()
-
-        return project_root
-
-    @classmethod
-    def local_file(
-        cls,
-        subdirectory: str | None = None,
-        name: str | None = None,
-        extension: str | None = None,
-    ) -> Path:
-        """
-        Build a fully-resolved file path inside the project using the
-        familiar subdirectory + name + extension pattern.
-
-        Example:
-            local_file("images", "cat", "png")
-            -> ROOT/images/cat.png
-        """
-        if name is None or len(name.strip()) == 0:
-            raise ValueError("local_file requires a non-empty 'name'")
-
-        # Clean outer slashes
-        if subdirectory:
-            subdirectory = cls._strip_outer_slashes(subdirectory)
-        name = cls._strip_outer_slashes(name)
-
-        name_path = Path(name)
-
-        # Extension override
-        if extension:
-            extension = extension.lstrip(".")
-            parent = name_path.parent
-            stem = name_path.stem
-
-            if str(parent) == ".":
-                file_name = f"{stem}.{extension}"
-            else:
-                file_name = str(parent / f"{stem}.{extension}")
-        else:
-            file_name = name
-
-        root = Path(__file__).resolve().parent.parent
-        if subdirectory:
-            final_path = root / subdirectory / file_name
-        else:
-            final_path = root / file_name
-
-        return final_path.resolve()
-
-    # ================================================================
-    # FILE LISTING (FLAT + RECURSIVE)
-    # ================================================================
-
-    @classmethod
-    def get_all_files(cls, directory: PathLike) -> List[Path]:
-        """
-        Return all direct (non-directory) files in directory.
-        """
-        dir_path = cls._to_path(directory)
-        if not dir_path.exists():
-            return []
-        return [p for p in dir_path.iterdir() if p.is_file()]
-
-    @classmethod
-    def get_all_files_local(cls, subdirectory: PathLike) -> List[Path]:
-        folder = cls.local_directory(subdirectory)
-        return cls.get_all_files(folder)
-
-    @classmethod
-    def get_all_files_recursive(cls, directory: PathLike) -> List[Path]:
-        """
-        Return all files in all nested subdirectories.
-        """
-        dir_path = cls._to_path(directory)
-        if not dir_path.exists():
-            return []
-        return [p for p in dir_path.rglob("*") if p.is_file()]
-
-    @classmethod
-    def get_all_files_local_recursive(cls, subdirectory: PathLike) -> List[Path]:
-        folder = cls.local_directory(subdirectory)
-        return cls.get_all_files_recursive(folder)
-
-    # ================================================================
-    # Helpers
-    # ================================================================
-
-    @classmethod
-    def _strip_outer_slashes(cls, s: str) -> str:
-        if not isinstance(s, str):
-            raise TypeError("Path must be a string")
-        return s.lstrip("/\\").rstrip("/\\")
-
-    @classmethod
-    def _ensure_parent_dir(cls, path: Path) -> None:
-        parent = path.parent
-        if not parent.exists():
-            parent.mkdir(parents=True, exist_ok=True)
-
-    @classmethod
-    def _to_path(cls, p: PathLike) -> Path:
-        if isinstance(p, Path):
-            return p.resolve()
-        return Path(p).resolve()
-
-    # ================================================================
-    # Core I/O: bytes only
-    # ================================================================
-
-    @classmethod
-    def load(cls, file_path: PathLike) -> bytes:
-        """
-        Load raw bytes from an explicit path.
-
-        Caller decides how to interpret the bytes (text, image, etc.).
-        """
-        path = cls._to_path(file_path)
-
-        if not path.is_file():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        return path.read_bytes()
-
-    @classmethod
-    def load_local(
-        cls,
-        subdirectory: str | None = None,
-        name: str | None = None,
-        extension: str | None = None,
-    ) -> bytes:
-        """
-        Build a local file path via local_file() and load raw bytes.
-        """
-        path = cls.local_file(subdirectory=subdirectory, name=name, extension=extension)
-        return cls.load(path)
-
-    @classmethod
-    def save(cls, data: bytes, file_path: PathLike) -> Path:
-        """
-        Save raw bytes to a specific path.
-
-        - Creates parent directories if needed.
-        - Returns the resolved Path actually written.
-        """
-        path = cls._to_path(file_path)
-        cls._ensure_parent_dir(path)
-        path.write_bytes(data)
-        return path
-
-    @classmethod
-    def save_local(
-        cls,
-        data: bytes,
-        subdirectory: str | None = None,
-        name: str | None = None,
-        extension: str | None = None,
-    ) -> Path:
-        """
-        Build a local file path via local_file() and save raw bytes there.
-        """
-        path = cls.local_file(subdirectory=subdirectory, name=name, extension=extension)
-        return cls.save(data, path)
-
-
-
-# ===== file_utils.py =====
-
-# file_utils.py
-from __future__ import annotations
-from typing import TYPE_CHECKING
-
-from pathlib import Path
-from typing import Optional
-
-from filesystem.file_io import FileIO
-from PIL import Image
-
-if TYPE_CHECKING:
-    # Only imported for type checkers / IDEs, not at runtime
-    from image.bitmap import Bitmap
-
-class FileUtils:
-
-    # ================================================================
-    # TEXT UTILITIES
-    # ================================================================
-
-    @classmethod
-    def load_text(cls, file_path: Path, encoding: str = "utf-8") -> str:
-        data = FileIO.load(file_path)
-        return data.decode(encoding)
-
-    @classmethod
-    def load_local_text(cls, subdirectory: Optional[str], name: str, extension: str, encoding="utf-8") -> str:
-        path = FileIO.local_file(subdirectory, name, extension)
-        return cls.load_text(path, encoding)
-
-    @classmethod
-    def save_text(cls, text: str, file_path: Path, encoding: str = "utf-8") -> Path:
-        data = text.encode(encoding)
-        return FileIO.save(data, file_path)
-
-    @classmethod
-    def save_local_text(cls, text: str, subdirectory: Optional[str], name: str, extension: str, encoding="utf-8") -> Path:
-        data = text.encode(encoding)
-        return FileIO.save_local(data, subdirectory, name, extension)
-
-    # ================================================================
-    # IMAGE UTILITIES
-    # ================================================================
-
-    @classmethod
-    def load_image(cls, file_path: Path) -> Image.Image:
-        path = Path(file_path).resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Image not found: {path}")
-        img = Image.open(path)
-        img.load()
-        return img
-    
-    @classmethod
-    def load_bitmap(cls, file_path: Path) -> Bitmap:
-        image = cls.load_image(file_path)
-        bitmap = Bitmap()
-        bitmap.import_pillow(image)
-
-    @classmethod
-    def load_local_image(cls, subdirectory: Optional[str], name: str, extension="png") -> Image.Image:
-        path = FileIO.local_file(subdirectory, name, extension)
-        return cls.load_image(path)
-    
-    @classmethod
-    def load_local_bitmap(cls, subdirectory: Optional[str], name: str, extension="png") -> Bitmap:
-        path = FileIO.local_file(subdirectory, name, extension)
-        return cls.load_bitmap(path)
-
-    @classmethod
-    def save_image(cls, image: Image.Image, file_path: Path) -> Path:
-        path = Path(file_path).resolve()
-        FileIO._ensure_parent_dir(path)
-        image.save(path)
-        return path
-
-    @classmethod
-    def save_local_image(cls, image: Image.Image, subdirectory: Optional[str], name: str, extension="png") -> Path:
-        path = FileIO.local_file(subdirectory, name, extension)
-        return cls.save_image(image, path)
-    
-    @classmethod
-    def save_local_bitmap(cls, bitmap: Optional[Bitmap], subdirectory: Optional[str], name: str, extension="png") -> Path:
-        path = FileIO.local_file(subdirectory, name, extension)
-        return cls.save_image(bitmap.export_pillow(), path)
+        yield img_patch, mask_patch, label.name
 
 
 

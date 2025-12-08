@@ -218,8 +218,8 @@ def cross_verify_once(trial_index: int):
 # ------------------------------------------------------------
 
 if __name__ == "__main__":
-    np.random.seed(1337)
-    torch.manual_seed(1337)
+    np.random.seed(9999)
+    torch.manual_seed(9999)
 
     print(f"[convo_cross_verify] Running {NUM_TRIALS} random trials...\n")
 

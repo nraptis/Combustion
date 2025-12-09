@@ -19,7 +19,6 @@ FEATURE_COLUMNS: List[str] = [
 
 TARGET_COLUMN = "species"
 
-
 @dataclass
 class PenguinDataset:
     """

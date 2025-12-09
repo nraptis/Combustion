@@ -347,6 +347,263 @@ def softmax_cross_entropy(logits: np.ndarray, target_index: int) -> float:
 
 
 
+# ===== scorch_adaptive_avg_pool2d.py =====
+
+# scorch/scorch_adaptive_avg_pool2d.py
+from __future__ import annotations
+
+import numpy as np
+from scorch.scorch_module import ScorchModule
+
+
+class ScorchAdaptiveAvgPool2d(ScorchModule):
+    """
+    Adaptive average pooling for 2D inputs, matching PyTorch's behavior.
+
+    Supports:
+        - input:  (N, C, H, W)  → output: (N, C, H_out, W_out)
+        - input:  (C, H, W)     → output: (C, H_out, W_out)
+
+    Where (H_out, W_out) = output_size.
+
+    For each output index (oh, ow), the pooling region in the input is:
+
+        h_start = floor(oh     * H / H_out)
+        h_end   = ceil ((oh+1) * H / H_out)
+
+        w_start = floor(ow     * W / W_out)
+        w_end   = ceil ((ow+1) * W / W_out)
+
+    (implemented with exact integer math)
+
+    Forward:
+        y[n,c,oh,ow] = mean over x[n,c,h_start:h_end, w_start:w_end]
+
+    Backward:
+        dL/dx[n,c,h,w] = sum over all (oh,ow) whose region includes (h,w)
+                         grad_out[n,c,oh,ow] / area_region(oh,ow)
+    """
+
+    def __init__(self, output_size, name: str | None = None):
+        super().__init__()
+
+        # Normalize output_size to (H_out, W_out)
+        if isinstance(output_size, int):
+            output_size = (output_size, output_size)
+
+        if not (isinstance(output_size, (tuple, list)) and len(output_size) == 2):
+            raise ValueError(
+                f"ScorchAdaptiveAvgPool2d: output_size must be int or (h,w) tuple, "
+                f"got {output_size!r}"
+            )
+
+        H_out, W_out = int(output_size[0]), int(output_size[1])
+        if H_out <= 0 or W_out <= 0:
+            raise ValueError(
+                f"ScorchAdaptiveAvgPool2d: output_size elements must be > 0, "
+                f"got {output_size}"
+            )
+
+        self.output_size = (H_out, W_out)
+        self.name = name or f"ScorchAdaptiveAvgPool2d(output_size={self.output_size})"
+
+        # Caches
+        self._last_input_shape: tuple[int, int, int, int] | None = None
+        self._input_was_3d: bool = False
+
+        # Per-forward index maps for backward reuse
+        self._h_start = None
+        self._h_end = None
+        self._w_start = None
+        self._w_end = None
+
+    # ------------------------------------------------------
+    # Internal helpers to build pooling regions
+    # ------------------------------------------------------
+    @staticmethod
+    def _compute_region_indices(in_size: int, out_size: int):
+        """
+        Compute start/end indices for each output index, matching the
+        "adaptive" logic used in frameworks like PyTorch.
+
+        For each o in [0, out_size):
+            start = floor(o     * in_size / out_size)
+            end   = ceil ((o+1) * in_size / out_size)
+
+        Implemented with integer arithmetic to avoid floating rounding issues:
+
+            start = (o * in_size) // out_size
+            end   = ((o + 1) * in_size + out_size - 1) // out_size
+        """
+        starts = []
+        ends = []
+        for o in range(out_size):
+            start = (o * in_size) // out_size
+            end = ((o + 1) * in_size + out_size - 1) // out_size
+            # Clamp just in case
+            start = max(0, min(start, in_size))
+            end = max(start, min(end, in_size))
+            starts.append(start)
+            ends.append(end)
+        return starts, ends
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(self, x):
+        """
+        x: np.ndarray, shape (N,C,H,W) or (C,H,W)
+
+        returns:
+            y: shape (N,C,H_out,W_out) or (C,H_out,W_out)
+        """
+        x_arr = np.asarray(x, dtype=np.float32)
+
+        if x_arr.ndim == 3:
+            # (C,H,W) => (1,C,H,W)
+            self._input_was_3d = True
+            x_arr = x_arr[np.newaxis, ...]
+        elif x_arr.ndim == 4:
+            self._input_was_3d = False
+        else:
+            raise ValueError(
+                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
+            )
+
+        N, C, H, W = x_arr.shape
+        self._last_input_shape = (N, C, H, W)
+
+        H_out, W_out = self.output_size
+
+        # Precompute pooling regions
+        h_start, h_end = self._compute_region_indices(H, H_out)
+        w_start, w_end = self._compute_region_indices(W, W_out)
+
+        self._h_start = h_start
+        self._h_end = h_end
+        self._w_start = w_start
+        self._w_end = w_end
+
+        # Allocate output
+        y = np.zeros((N, C, H_out, W_out), dtype=np.float32)
+
+        for n in range(N):
+            for c in range(C):
+                for oh in range(H_out):
+                    hs = h_start[oh]
+                    he = h_end[oh]
+                    h_len = he - hs
+                    if h_len <= 0:
+                        continue
+
+                    for ow in range(W_out):
+                        ws = w_start[ow]
+                        we = w_end[ow]
+                        w_len = we - ws
+                        if w_len <= 0:
+                            continue
+
+                        region = x_arr[n, c, hs:he, ws:we]
+                        area = float(h_len * w_len)
+                        y[n, c, oh, ow] = region.sum() / area
+
+        if self._input_was_3d:
+            return y[0]  # (C,H_out,W_out)
+        else:
+            return y     # (N,C,H_out,W_out)
+
+    # ------------------------------------------------------
+    # Backward
+    # ------------------------------------------------------
+    def backward(self, grad_output):
+        """
+        grad_output:
+            - If input was 4D: (N,C,H_out,W_out)
+            - If input was 3D: (C,H_out,W_out)
+
+        returns:
+            grad_input with same shape as original x:
+            - (N,C,H,W) or (C,H,W)
+        """
+        if self._last_input_shape is None:
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        if self._h_start is None or self._w_start is None:
+            raise RuntimeError(f"{self.name}: region indices missing; forward not run?")
+
+        N, C, H, W = self._last_input_shape
+        H_out, W_out = self.output_size
+        h_start = self._h_start
+        h_end = self._h_end
+        w_start = self._w_start
+        w_end = self._w_end
+
+        g_out = np.asarray(grad_output, dtype=np.float32)
+
+        # Normalize grad_output shape to 4D
+        if self._input_was_3d:
+            if g_out.ndim != 3 or g_out.shape[0] != C:
+                raise ValueError(
+                    f"{self.name}: grad_output for 3D input must be (C,H_out,W_out), "
+                    f"got {g_out.shape}"
+                )
+            g_out = g_out[np.newaxis, ...]  # (1,C,H_out,W_out)
+        else:
+            if g_out.ndim != 4 or g_out.shape != (N, C, H_out, W_out):
+                raise ValueError(
+                    f"{self.name}: grad_output for 4D input must be (N,C,H_out,W_out), "
+                    f"got {g_out.shape}"
+                )
+
+        grad_x = np.zeros((N, C, H, W), dtype=np.float32)
+
+        for n in range(N):
+            for c in range(C):
+                for oh in range(H_out):
+                    hs = h_start[oh]
+                    he = h_end[oh]
+                    h_len = he - hs
+                    if h_len <= 0:
+                        continue
+
+                    for ow in range(W_out):
+                        ws = w_start[ow]
+                        we = w_end[ow]
+                        w_len = we - ws
+                        if w_len <= 0:
+                            continue
+
+                        go = g_out[n, c, oh, ow]
+                        area = float(h_len * w_len)
+                        if area <= 0:
+                            continue
+
+                        share = go / area
+                        for h_idx in range(hs, he):
+                            for w_idx in range(ws, we):
+                                grad_x[n, c, h_idx, w_idx] += share
+
+        if self._input_was_3d:
+            return grad_x[0]  # (C,H,W)
+        else:
+            return grad_x     # (N,C,H,W)
+
+    # ------------------------------------------------------
+    # Parameters / grads
+    # ------------------------------------------------------
+    def parameters(self):
+        # No learnable parameters
+        return []
+
+    def zero_grad(self):
+        # Nothing to reset
+        pass
+
+    def __repr__(self):
+        return self.name
+
+
+
 # ===== scorch_conv2d.py =====
 
 # scorch/scorch_conv2d.py
@@ -1274,9 +1531,597 @@ class ScorchLinear(ScorchModule):
 
 # ===== scorch_max_pool2d.py =====
 
-# scorch_max_pool2d.py
+# scorch/scorch_max_pool2d.py
+from __future__ import annotations
 
-#dead ChatGPT, let's make a perfect clone of this for our honorific framework.
+import numpy as np
+from scorch.scorch_module import ScorchModule
+
+
+class ScorchMaxPool2d(ScorchModule):
+    """
+    Pure loop-based reference implementation of 2D max pooling.
+
+    Semantics (matched to PyTorch nn.MaxPool2d):
+
+        Input:   (N, C, H_in, W_in)  or (C, H_in, W_in) for single sample
+        Output:  (N, C, H_out, W_out) or (C, H_out, W_out)
+
+    Parameters:
+        kernel_size:  int or (k_h, k_w)
+        stride:       int or (s_h, s_w) (defaults to kernel_size if None)
+        padding:      int or (p_h, p_w)
+        dilation:     int or (d_h, d_w)
+
+    Forward:
+        - Pads with -inf (so padded region never wins max).
+        - For each (n, c, oy, ox), takes max over the pooled window.
+
+    Backward:
+        - Gradient flows only to the location that held the max.
+        - We store the max coordinates during forward and scatter grad back.
+    """
+
+    def __init__(
+        self,
+        kernel_size: int | tuple[int, int],
+        stride: int | tuple[int, int] | None = None,
+        padding: int | tuple[int, int] = 0,
+        dilation: int | tuple[int, int] = 1,
+        name: str | None = None,
+    ):
+        super().__init__()
+
+        # Normalize kernel size
+        if isinstance(kernel_size, int):
+            self.k_h = self.k_w = kernel_size
+        else:
+            self.k_h, self.k_w = kernel_size
+
+        # Normalize stride (default to kernel_size if None)
+        if stride is None:
+            self.s_h = self.k_h
+            self.s_w = self.k_w
+        elif isinstance(stride, int):
+            self.s_h = self.s_w = stride
+        else:
+            self.s_h, self.s_w = stride
+
+        # Normalize padding
+        if isinstance(padding, int):
+            self.p_h = self.p_w = padding
+        else:
+            self.p_h, self.p_w = padding
+
+        # Normalize dilation
+        if isinstance(dilation, int):
+            self.d_h = self.d_w = dilation
+        else:
+            self.d_h, self.d_w = dilation
+
+        self.name = name or (
+            f"ScorchMaxPool2d(kernel=({self.k_h},{self.k_w}), "
+            f"stride=({self.s_h},{self.s_w}), "
+            f"padding=({self.p_h},{self.p_w}), "
+            f"dilation=({self.d_h},{self.d_w}))"
+        )
+
+        # Caches for backward
+        self._last_input_shape: tuple[int, int, int, int] | None = None
+        self._H_out: int | None = None
+        self._W_out: int | None = None
+        self._input_was_3d: bool = False
+
+        # Max locations in padded coordinates:
+        #   _max_y, _max_x: shape (N, C, H_out, W_out), ints
+        self._max_y: np.ndarray | None = None
+        self._max_x: np.ndarray | None = None
+
+    # ----------------------------------------------------------
+    # Forward
+    # ----------------------------------------------------------
+    def forward(self, x):
+        """
+        x: np.ndarray, shape (N, C, H, W) or (C, H, W)
+        returns: np.ndarray, shape (N, C, H_out, W_out) or (C, H_out, W_out)
+        """
+        x_arr = np.asarray(x, dtype=np.float32)
+
+        # Allow 3D (C,H,W) by promoting to N=1
+        if x_arr.ndim == 3:
+            self._input_was_3d = True
+            x_arr = x_arr[np.newaxis, ...]  # (1, C, H, W)
+        elif x_arr.ndim == 4:
+            self._input_was_3d = False
+        else:
+            raise ValueError(
+                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
+            )
+
+        N, C, H, W = x_arr.shape
+
+        # Compute output dims (same formula as conv)
+        H_out = ((H + 2 * self.p_h - self.d_h * (self.k_h - 1) - 1)
+                 // self.s_h + 1)
+        W_out = ((W + 2 * self.p_w - self.d_w * (self.k_w - 1) - 1)
+                 // self.s_w + 1)
+
+        if H_out <= 0 or W_out <= 0:
+            raise ValueError(
+                f"{self.name}: Non-positive output size "
+                f"H_out={H_out}, W_out={W_out} for input (H={H},W={W})"
+            )
+
+        # Pad with -inf so padding never wins the max
+        x_padded = np.pad(
+            x_arr,
+            pad_width=(
+                (0, 0),                 # batch
+                (0, 0),                 # channels
+                (self.p_h, self.p_h),   # height
+                (self.p_w, self.p_w),   # width
+            ),
+            mode="constant",
+            constant_values=-np.inf,
+        )
+
+        # Allocate output and max location caches
+        y = np.zeros((N, C, H_out, W_out), dtype=np.float32)
+        max_y = np.zeros((N, C, H_out, W_out), dtype=np.int32)
+        max_x = np.zeros((N, C, H_out, W_out), dtype=np.int32)
+
+        # ------------------------------------------------------
+        # Nested loops: N, C, H_out, W_out, then kernel window
+        # ------------------------------------------------------
+        for n in range(N):
+            for c in range(C):
+                for oy in range(H_out):
+                    in_y_origin = oy * self.s_h
+                    for ox in range(W_out):
+                        in_x_origin = ox * self.s_w
+
+                        best_val = -np.inf
+                        best_iy = 0
+                        best_ix = 0
+
+                        for ky in range(self.k_h):
+                            iy = in_y_origin + ky * self.d_h
+                            for kx in range(self.k_w):
+                                ix = in_x_origin + kx * self.d_w
+
+                                v = x_padded[n, c, iy, ix]
+                                # IMPORTANT: strict ">" to match np.argmax
+                                if v > best_val:
+                                    best_val = v
+                                    best_iy = iy
+                                    best_ix = ix
+
+                        y[n, c, oy, ox] = best_val
+                        max_y[n, c, oy, ox] = best_iy
+                        max_x[n, c, oy, ox] = best_ix
+
+        # Cache for backward
+        self._last_input_shape = (N, C, H, W)
+        self._H_out = H_out
+        self._W_out = W_out
+        self._max_y = max_y
+        self._max_x = max_x
+
+        if self._input_was_3d:
+            return y[0]  # (C, H_out, W_out)
+        else:
+            return y     # (N, C, H_out, W_out)
+
+    # ----------------------------------------------------------
+    # Backward
+    # ----------------------------------------------------------
+    def backward(self, grad_output):
+        """
+        grad_output:
+            dL/dy, shape (N, C, H_out, W_out) or (C, H_out, W_out)
+
+        Returns:
+            dL/dx, shape (N, C, H, W) or (C, H, W)
+        """
+        if (
+            self._last_input_shape is None
+            or self._H_out is None
+            or self._W_out is None
+            or self._max_y is None
+            or self._max_x is None
+        ):
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        N, C, H, W = self._last_input_shape
+        H_out = self._H_out
+        W_out = self._W_out
+
+        g_out = np.asarray(grad_output, dtype=np.float32)
+
+        # Normalize grad_output shape to 4D
+        if self._input_was_3d:
+            if g_out.ndim != 3:
+                raise ValueError(
+                    f"{self.name}: grad_output for 3D input must be 3D "
+                    f"(C,H_out,W_out), got {g_out.shape}"
+                )
+            if g_out.shape != (C, H_out, W_out):
+                raise ValueError(
+                    f"{self.name}: grad_output shape {g_out.shape} does not match "
+                    f"(C,H_out,W_out)=({C},{H_out},{W_out})"
+                )
+            g_out = g_out[np.newaxis, ...]  # (1, C, H_out, W_out)
+        else:
+            if g_out.ndim != 4:
+                raise ValueError(
+                    f"{self.name}: grad_output for 4D input must be 4D "
+                    f"(N,C,H_out,W_out), got {g_out.shape}"
+                )
+            if g_out.shape != (N, C, H_out, W_out):
+                raise ValueError(
+                    f"{self.name}: grad_output shape {g_out.shape} does not match "
+                    f"(N,C,H_out,W_out)=({N},{C},{H_out},{W_out})"
+                )
+
+        # Grad wrt *padded* input
+        grad_x_padded = np.zeros(
+            (N, C, H + 2 * self.p_h, W + 2 * self.p_w),
+            dtype=np.float32,
+        )
+
+        max_y = self._max_y
+        max_x = self._max_x
+
+        # Scatter each grad_output element to its argmax location
+        for n in range(N):
+            for c in range(C):
+                for oy in range(H_out):
+                    for ox in range(W_out):
+                        iy = max_y[n, c, oy, ox]
+                        ix = max_x[n, c, oy, ox]
+                        grad_x_padded[n, c, iy, ix] += g_out[n, c, oy, ox]
+
+        # Remove padding
+        grad_x = grad_x_padded[
+            :,
+            :,
+            self.p_h:self.p_h + H,
+            self.p_w:self.p_w + W,
+        ]
+
+        if self._input_was_3d:
+            return grad_x[0]  # (C, H, W)
+        else:
+            return grad_x     # (N, C, H, W)
+
+    # ----------------------------------------------------------
+    # Parameters / grads
+    # ----------------------------------------------------------
+    def parameters(self):
+        # No learnable parameters
+        return []
+
+    def zero_grad(self):
+        # No parameter gradients to reset
+        pass
+
+    def __repr__(self):
+        return self.name
+
+
+
+# ===== scorch_max_pool2d_fast.py =====
+
+# scorch/scorch_max_pool2d_fast.py
+from __future__ import annotations
+
+import numpy as np
+from scorch.scorch_module import ScorchModule
+from scorch.scorch_conv2d_fast import col2im
+
+
+def im2col_maxpool(
+    x,
+    k_h, k_w,
+    s_h, s_w,
+    p_h, p_w,
+    d_h, d_w,
+):
+    """
+    im2col specialized for max-pooling:
+
+    Input:
+        x: (N, C, H, W)
+
+    Output:
+        cols: (N, C * k_h * k_w, H_out * W_out)
+
+    Uses padding with -inf so that padded regions never win the max.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    N, C, H, W = x.shape
+
+    H_out = ((H + 2 * p_h - d_h * (k_h - 1) - 1) // s_h) + 1
+    W_out = ((W + 2 * p_w - d_w * (k_w - 1) - 1) // s_w) + 1
+
+    # Pad with -inf so padding is never chosen as max
+    x_padded = np.pad(
+        x,
+        pad_width=(
+            (0, 0),
+            (0, 0),
+            (p_h, p_h),
+            (p_w, p_w),
+        ),
+        mode="constant",
+        constant_values=-np.inf,
+    )
+
+    cols = np.zeros((N, C * k_h * k_w, H_out * W_out), dtype=np.float32)
+
+    out_col = 0
+    for oy in range(H_out):
+        in_y_origin = oy * s_h
+        for ox in range(W_out):
+            in_x_origin = ox * s_w
+
+            patch_idx = 0
+            for c in range(C):
+                for ky in range(k_h):
+                    iy = in_y_origin + ky * d_h
+                    for kx in range(k_w):
+                        ix = in_x_origin + kx * d_w
+
+                        cols[:, patch_idx, out_col] = x_padded[:, c, iy, ix]
+                        patch_idx += 1
+
+            out_col += 1
+
+    return cols  # (N, C*k_h*k_w, H_out*W_out)
+
+
+class ScorchMaxPool2dFast(ScorchModule):
+    """
+    High-performance 2D max pooling using im2col + NumPy ops.
+
+    Semantics:
+
+        Input:   (N, C, H_in, W_in)  or (C, H_in, W_in) for single sample
+        Output:  (N, C, H_out, W_out) or (C, H_out, W_out)
+
+    Parameters:
+        kernel_size:  int or (k_h, k_w)
+        stride:       int or (s_h, s_w) (defaults to kernel_size if None)
+        padding:      int or (p_h, p_w)
+        dilation:     int or (d_h, d_w)
+
+    Forward:
+        - Uses im2col_maxpool (padding=-inf) to build patches.
+        - Takes max over each patch.
+
+    Backward:
+        - Gradient flows only to the location that held the max in each patch.
+        - Implemented via scattering into a grad_cols matrix, then col2im.
+    """
+
+    def __init__(
+        self,
+        kernel_size: int | tuple[int, int],
+        stride: int | tuple[int, int] | None = None,
+        padding: int | tuple[int, int] = 0,
+        dilation: int | tuple[int, int] = 1,
+        name: str | None = None,
+    ):
+        super().__init__()
+
+        # Normalize kernel size
+        if isinstance(kernel_size, int):
+            self.k_h = self.k_w = kernel_size
+        else:
+            self.k_h, self.k_w = kernel_size
+
+        # Normalize stride (default to kernel_size if None)
+        if stride is None:
+            self.s_h = self.k_h
+            self.s_w = self.k_w
+        elif isinstance(stride, int):
+            self.s_h = self.s_w = stride
+        else:
+            self.s_h, self.s_w = stride
+
+        # Normalize padding
+        if isinstance(padding, int):
+            self.p_h = self.p_w = padding
+        else:
+            self.p_h, self.p_w = padding
+
+        # Normalize dilation
+        if isinstance(dilation, int):
+            self.d_h = self.d_w = dilation
+        else:
+            self.d_h, self.d_w = dilation
+
+        self.name = name or (
+            f"ScorchMaxPool2dFast(kernel=({self.k_h},{self.k_w}), "
+            f"stride=({self.s_h},{self.s_w}), "
+            f"padding=({self.p_h},{self.p_w}), "
+            f"dilation=({self.d_h},{self.d_w}))"
+        )
+
+        # Cache for backward
+        self._last_input_shape = None    # (N, C, H, W)
+        self._H_out = None
+        self._W_out = None
+        self._argmax = None              # (N, C, H_out*W_out), indices in [0, K)
+        self._input_was_3d = False       # True if original input was (C,H,W)
+
+    # ----------------------------------------------------------
+    # Forward
+    # ----------------------------------------------------------
+    def forward(self, x):
+        """
+        x: np.ndarray, shape (N, C, H, W) or (C, H, W)
+        returns: np.ndarray, shape (N, C, H_out, W_out) or (C, H_out, W_out)
+        """
+        x_arr = np.asarray(x, dtype=np.float32)
+
+        # Accept 3D (C,H,W) by promoting to batch size 1
+        if x_arr.ndim == 3:
+            self._input_was_3d = True
+            x_arr = x_arr[np.newaxis, ...]  # (1, C, H, W)
+        elif x_arr.ndim == 4:
+            self._input_was_3d = False
+        else:
+            raise ValueError(
+                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
+            )
+
+        N, C, H, W = x_arr.shape
+
+        # Compute output dims (same formula as conv)
+        H_out = ((H + 2 * self.p_h - self.d_h * (self.k_h - 1) - 1)
+                 // self.s_h + 1)
+        W_out = ((W + 2 * self.p_w - self.d_w * (self.k_w - 1) - 1)
+                 // self.s_w + 1)
+
+        if H_out <= 0 or W_out <= 0:
+            raise ValueError(
+                f"{self.name}: Non-positive output size "
+                f"H_out={H_out}, W_out={W_out} for input (H={H},W={W})"
+            )
+
+        # im2col for pooling (pads with -inf)
+        cols = im2col_maxpool(
+            x_arr,
+            self.k_h, self.k_w,
+            self.s_h, self.s_w,
+            self.p_h, self.p_w,
+            self.d_h, self.d_w,
+        )  # (N, C*k_h*k_w, H_out*W_out)
+
+        K = self.k_h * self.k_w
+        P = H_out * W_out
+
+        # Reshape to: (N, C, K, P)
+        cols_reshaped = cols.reshape(N, C, K, P)
+
+        # Max over kernel dimension K
+        max_vals = cols_reshaped.max(axis=2)                          # (N, C, P)
+        argmax_idx = cols_reshaped.argmax(axis=2).astype(np.int32)    # (N, C, P)
+
+        # Reshape back to (N, C, H_out, W_out)
+        y = max_vals.reshape(N, C, H_out, W_out)
+
+        # Cache for backward
+        self._last_input_shape = (N, C, H, W)
+        self._H_out = H_out
+        self._W_out = W_out
+        self._argmax = argmax_idx
+
+        if self._input_was_3d:
+            # Return (C, H_out, W_out)
+            return y[0]
+        else:
+            return y
+
+    # ----------------------------------------------------------
+    # Backward
+    # ----------------------------------------------------------
+    def backward(self, grad_output):
+        """
+        grad_output:
+            dL/dy, shape (N, C, H_out, W_out) or (C, H_out, W_out)
+
+        Returns:
+            dL/dx, shape (N, C, H, W) or (C, H, W)
+        """
+        if (
+            self._last_input_shape is None
+            or self._argmax is None
+            or self._H_out is None
+            or self._W_out is None
+        ):
+            raise RuntimeError(f"{self.name}: backward called before forward.")
+
+        N, C, H, W = self._last_input_shape
+        H_out = self._H_out
+        W_out = self._W_out
+        P = H_out * W_out
+        K = self.k_h * self.k_w
+
+        g_out = np.asarray(grad_output, dtype=np.float32)
+
+        # Normalize grad_output to 4D
+        if self._input_was_3d:
+            if g_out.ndim != 3:
+                raise ValueError(
+                    f"{self.name}: grad_output for 3D input must be 3D "
+                    f"(C,H_out,W_out), got {g_out.shape}"
+                )
+            if g_out.shape != (C, H_out, W_out):
+                raise ValueError(
+                    f"{self.name}: grad_output shape {g_out.shape} does not match "
+                    f"(C,H_out,W_out)=({C},{H_out},{W_out})"
+                )
+            g_out = g_out[np.newaxis, ...]  # (1, C, H_out, W_out)
+        else:
+            if g_out.ndim != 4:
+                raise ValueError(
+                    f"{self.name}: grad_output for 4D input must be 4D "
+                    f"(N,C,H_out,W_out), got {g_out.shape}"
+                )
+            if g_out.shape != (N, C, H_out, W_out):
+                raise ValueError(
+                    f"{self.name}: grad_output shape {g_out.shape} does not match "
+                    f"(N,C,H_out,W_out)=({N},{C},{H_out},{W_out})"
+                )
+
+        # Flatten grad_output to (N, C, P)
+        g_out_flat = g_out.reshape(N, C, P)   # (N, C, P)
+        argmax = self._argmax                 # (N, C, P)
+
+        # Build grad_cols of shape (N, C*K, P)
+        grad_cols = np.zeros((N, C * K, P), dtype=np.float32)
+
+        # For each (n,c,p), route g_out_flat[n,c,p] to
+        # grad_cols[n, c*K + argmax[n,c,p], p]
+        for n in range(N):
+            for c in range(C):
+                for p in range(P):
+                    k_idx = argmax[n, c, p]
+                    go = g_out_flat[n, c, p]
+                    grad_cols[n, c * K + k_idx, p] += go
+
+        # Convert column gradients back to image-space gradients
+        grad_x = col2im(
+            grad_cols,
+            (N, C, H, W),
+            self.k_h, self.k_w,
+            self.s_h, self.s_w,
+            self.p_h, self.p_w,
+            self.d_h, self.d_w,
+        )
+
+        if self._input_was_3d:
+            # Return (C, H, W)
+            return grad_x[0]
+        else:
+            return grad_x
+
+    # ----------------------------------------------------------
+    # Parameters / grads
+    # ----------------------------------------------------------
+    def parameters(self):
+        # No learnable parameters
+        return []
+
+    def zero_grad(self):
+        # No parameter gradients to reset
+        pass
+
+    def __repr__(self):
+        return self.name
+
 
 
 # ===== scorch_module.py =====
@@ -1573,6 +2418,261 @@ class ScorchSequential(ScorchModule):
     def __repr__(self):
         inner = ",\n  ".join(repr(layer) for layer in self.layers)
         return f"ScorchSequential(\n  {inner}\n)"
+
+
+
+# ===== scorch_small_convnet_multitask.py =====
+
+# scorch/scorch_small_convnet_multitask.py
+from __future__ import annotations
+
+import numpy as np
+
+from scorch.scorch_module import ScorchModule
+from scorch.scorch_sequential import ScorchSequential
+from scorch.scorch_conv2d_fast import ScorchConv2dFast
+from scorch.scorch_max_pool2d_fast import ScorchMaxPool2dFast
+from scorch.scorch_relu import ScorchReLU
+from scorch.scorch_linear import ScorchLinear
+from scorch.scorch_adaptive_avg_pool2d import ScorchAdaptiveAvgPool2d
+
+
+class ScorchSmallConvNetMultiTask(ScorchModule):
+    """
+    Tiny CNN that:
+      - Produces class logits (for patch classification).
+      - Produces a per-pixel mask (for segmentation).
+
+    Architecture mirrors the PyTorch reference:
+
+        features:
+            Conv2d(in_channels, 8,  kernel_size=3, padding=1)
+            ReLU
+            MaxPool2d(2)
+            Conv2d(8, 16, kernel_size=3, padding=1)
+            ReLU
+            MaxPool2d(2)
+
+        classifier:
+            AdaptiveAvgPool2d((1,1))
+            Flatten (N,16,1,1) -> (N,16)
+            Linear(16, 64)
+            ReLU
+            Linear(64, num_classes)
+
+        seg_head:
+            Conv2d(16, 16, kernel_size=3, padding=1)
+            ReLU
+            Conv2d(16, 1,  kernel_size=1)
+
+    Forward(x):
+        - x: np.ndarray, shape (N, in_channels, H, W)
+        Returns:
+        - class_logits: (N, num_classes)
+        - seg_logits:   (N, 1, Hf, Wf) where Hf,Wf are features' spatial dims
+
+    Backward expects a tuple:
+        backward((grad_class_logits, grad_seg_logits)).
+
+    Returns:
+        grad_input: dL/dx, shape (N, in_channels, H, W)
+    """
+
+    def __init__(self, in_channels: int, num_classes: int, name: str | None = None):
+        super().__init__()
+        self.in_channels = int(in_channels)
+        self.num_classes = int(num_classes)
+        self.name = name or f"ScorchSmallConvNetMultiTask(in={in_channels}, classes={num_classes})"
+
+        # --------------------------------------------------
+        # Shared feature extractor
+        # --------------------------------------------------
+        self.features = ScorchSequential(
+            ScorchConv2dFast(
+                in_channels=self.in_channels,
+                out_channels=8,
+                kernel_size=3,
+                padding=1,
+                name="conv1",
+            ),
+            ScorchReLU(name="relu1"),
+            ScorchMaxPool2dFast(kernel_size=2, stride=2, name="pool1"),
+
+            ScorchConv2dFast(
+                in_channels=8,
+                out_channels=16,
+                kernel_size=3,
+                padding=1,
+                name="conv2",
+            ),
+            ScorchReLU(name="relu2"),
+            ScorchMaxPool2dFast(kernel_size=2, stride=2, name="pool2"),
+        )
+
+        # --------------------------------------------------
+        # Classification head
+        #   feats -> AdaptiveAvgPool2d(1,1) -> Flatten -> FC(16->64) -> ReLU -> FC(64->num_classes)
+        # --------------------------------------------------
+        self.pool = ScorchAdaptiveAvgPool2d(output_size=(1, 1), name="global_avg_pool")
+
+        # 16 channels after conv2
+        self.classifier = ScorchSequential(
+            ScorchLinear(16, 64, name="cls_fc1"),
+            ScorchReLU(name="cls_relu"),
+            ScorchLinear(64, self.num_classes, name="cls_fc2"),
+        )
+
+        # We'll need to remember the pooled shape for reshaping in backward
+        self._last_pooled_shape = None  # (N, 16, 1, 1)
+
+        # --------------------------------------------------
+        # Segmentation head
+        #   feats -> Conv(16->16, k3,p1) -> ReLU -> Conv(16->1, k1)
+        # --------------------------------------------------
+        self.seg_head = ScorchSequential(
+            ScorchConv2dFast(
+                in_channels=16,
+                out_channels=16,
+                kernel_size=3,
+                padding=1,
+                name="seg_conv1",
+            ),
+            ScorchReLU(name="seg_relu"),
+            ScorchConv2dFast(
+                in_channels=16,
+                out_channels=1,
+                kernel_size=1,
+                padding=0,
+                name="seg_conv2",
+            ),
+        )
+
+        # Cache last feature map for backward sanity/debug if needed
+        self._last_feats_shape = None  # (N,16,Hf,Wf)
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
+    def forward(self, x):
+        """
+        x: np.ndarray, shape (N, in_channels, H, W)
+
+        returns:
+            class_logits: (N, num_classes)
+            seg_logits:   (N, 1, Hf, Wf)
+        """
+        x_arr = np.asarray(x, dtype=np.float32)
+
+        if x_arr.ndim != 4:
+            raise ValueError(
+                f"{self.name}: Expected 4D input (N,C,H,W), got {x_arr.shape}"
+            )
+
+        # Shared features
+        feats = self.features.forward(x_arr)  # (N,16,Hf,Wf)
+        self._last_feats_shape = feats.shape
+
+        N, C_feat, Hf, Wf = feats.shape
+        if C_feat != 16:
+            raise ValueError(
+                f"{self.name}: Expected features to have 16 channels, got {C_feat}"
+            )
+
+        # --------------------------------------------------
+        # Classification branch
+        # --------------------------------------------------
+        pooled = self.pool.forward(feats)  # (N,16,1,1)
+        self._last_pooled_shape = pooled.shape
+
+        # Flatten: (N,16,1,1) -> (N,16)
+        pooled_flat = pooled.reshape(N, C_feat)
+
+        class_logits = self.classifier.forward(pooled_flat)  # (N,num_classes)
+
+        # --------------------------------------------------
+        # Segmentation branch
+        # --------------------------------------------------
+        seg_logits = self.seg_head.forward(feats)  # (N,1,Hf,Wf)
+
+        return class_logits, seg_logits
+
+    # ------------------------------------------------------
+    # Backward
+    # ------------------------------------------------------
+    def backward(self, grad_output):
+        """
+        grad_output: tuple (grad_class_logits, grad_seg_logits):
+
+            grad_class_logits: shape (N, num_classes)
+            grad_seg_logits:   shape (N, 1, Hf, Wf)
+
+        returns:
+            grad_input: shape (N, in_channels, H, W)
+        """
+        if not isinstance(grad_output, (tuple, list)) or len(grad_output) != 2:
+            raise ValueError(
+                f"{self.name}.backward expects (grad_class_logits, grad_seg_logits) tuple, "
+                f"got {type(grad_output)}"
+            )
+
+        grad_class_logits, grad_seg_logits = grad_output
+
+        if self._last_feats_shape is None or self._last_pooled_shape is None:
+            raise RuntimeError(
+                f"{self.name}: backward called before forward (missing caches)."
+            )
+
+        N, C_feat, Hf, Wf = self._last_feats_shape
+        pooled_shape = self._last_pooled_shape  # (N,16,1,1)
+
+        grad_class = np.asarray(grad_class_logits, dtype=np.float32)
+        grad_seg = np.asarray(grad_seg_logits, dtype=np.float32)
+
+        # --------------------------------------------------
+        # Classification branch backward
+        # --------------------------------------------------
+        # classifier: Linear(16->64) -> ReLU -> Linear(64->num_classes)
+        # forward got pooled_flat (N,16)
+        grad_pooled_flat = self.classifier.backward(grad_class)  # (N,16)
+
+        # Unflatten back to pooled shape (N,16,1,1)
+        grad_pooled = grad_pooled_flat.reshape(pooled_shape)
+
+        # Back through AdaptiveAvgPool2d
+        grad_feats_from_cls = self.pool.backward(grad_pooled)  # (N,16,Hf,Wf)
+
+        # --------------------------------------------------
+        # Segmentation branch backward
+        # --------------------------------------------------
+        grad_feats_from_seg = self.seg_head.backward(grad_seg)  # (N,16,Hf,Wf)
+
+        # --------------------------------------------------
+        # Combine gradients from both branches
+        # --------------------------------------------------
+        grad_feats_total = grad_feats_from_cls + grad_feats_from_seg  # (N,16,Hf,Wf)
+
+        # Back through shared features
+        grad_input = self.features.backward(grad_feats_total)  # (N,in_channels,H,W)
+
+        return grad_input
+
+    # ------------------------------------------------------
+    # Parameter handling
+    # ------------------------------------------------------
+    def parameters(self):
+        params = []
+        params.extend(self.features.parameters())
+        params.extend(self.classifier.parameters())
+        params.extend(self.seg_head.parameters())
+        return params
+
+    def zero_grad(self):
+        self.features.zero_grad()
+        self.classifier.zero_grad()
+        self.seg_head.zero_grad()
+
+    def __repr__(self):
+        return self.name
 
 
 

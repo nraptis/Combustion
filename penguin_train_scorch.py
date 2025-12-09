@@ -11,6 +11,9 @@ from penguin_loader import load_penguin_dataset, PenguinDataset
 from scorch.scorch_sequential import ScorchSequential
 from scorch.scorch_linear import ScorchLinear
 from scorch.scorch_relu import ScorchReLU
+from scorch.torch_adam import TorchAdam
+from scorch.torch_optimizer import TorchParam
+
 
 
 # ------------------------------------------------------------
@@ -257,6 +260,14 @@ def train_penguin_net_scorch(
                 "v_b": v_b,
             })
 
+    params: list[TorchParam] = []
+    for layer in net.layers:
+        if isinstance(layer, ScorchLinear):
+            params.append(TorchParam(data=layer.W, grad=layer.grad_W))
+            params.append(TorchParam(data=layer.b, grad=layer.grad_b))
+
+    optimizer = TorchAdam(params, lr=1e-3)
+
     # ------------------------------------------------------
     # Training loop
     # ------------------------------------------------------
@@ -286,6 +297,7 @@ def train_penguin_net_scorch(
             # Backward through network
             net.zero_grad()
             _ = net.backward(grad_logits)
+            optimizer.step()
 
             # Momentum SGD step
             for entry in velocity:

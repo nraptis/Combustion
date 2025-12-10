@@ -12,7 +12,7 @@ from scorch.scorch_sequential import ScorchSequential
 from scorch.scorch_linear import ScorchLinear
 from scorch.scorch_relu import ScorchReLU
 from scorch.torch_adam import TorchAdam
-from scorch.torch_optimizer import TorchParam
+from scorch.scorch_optimizer import TorchParam
 
 
 

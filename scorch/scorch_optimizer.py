@@ -1,4 +1,4 @@
-# torch_optimizer.py
+# scorch_optimizer.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ class TorchParam:
     grad: np.ndarray | None = None
 
 
-class TorchOptimizer:
+class ScorchOptimizer:
     """
     Minimal PyTorch-style optimizer base class.
 
@@ -30,7 +30,7 @@ class TorchOptimizer:
     def __init__(self, params: Iterable[TorchParam], lr: float = 1e-3) -> None:
         self.params: List[TorchParam] = list(params)
         if len(self.params) == 0:
-            raise ValueError("TorchOptimizer got an empty parameter list.")
+            raise ValueError("ScorchOptimizer got an empty parameter list.")
         self.lr: float = float(lr)
 
     def zero_grad(self) -> None:
@@ -47,4 +47,4 @@ class TorchOptimizer:
 
         Must be overridden by subclasses.
         """
-        raise NotImplementedError("TorchOptimizer.step() must be implemented by subclasses.")
+        raise NotImplementedError("ScorchOptimizer.step() must be implemented by subclasses.")

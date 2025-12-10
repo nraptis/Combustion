@@ -4,10 +4,9 @@ from __future__ import annotations
 from typing import Iterable, List, Tuple
 import numpy as np
 
-from .torch_optimizer import TorchOptimizer, TorchParam
+from .scorch_optimizer import ScorchOptimizer, TorchParam
 
-
-class TorchAdam(TorchOptimizer):
+class TorchAdam(ScorchOptimizer):
     """
     Minimal Adam optimizer (NumPy / Scorch-friendly).
 

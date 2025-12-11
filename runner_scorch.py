@@ -1,8 +1,8 @@
 # runner_scorch.py
 
 from filesystem.file_utils import FileUtils
-from scorch.data_loader import DataLoader
-from scorch.tensor_load_helpers import iter_label_patches_from_pair
+from scorch_ext.data_loader import DataLoader
+from scorch_ext.tensor_load_helpers import iter_label_patches_from_pair
 
 
 def export_first_three_pairs_patches() -> None:

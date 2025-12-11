@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from scorch.scorch_dataset import ScorchPatchClassificationDataset
+from scorch_ext.scorch_dataset import ScorchPatchClassificationDataset
 
 
 class SmallConvNet(nn.Module):

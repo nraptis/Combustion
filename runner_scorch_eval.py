@@ -9,8 +9,8 @@ from filesystem.file_utils import FileUtils
 from image.bitmap import Bitmap
 from image.rgba import RGBA
 
-from scorch.data_loader import DataLoader
-from scorch.tensor_load_helpers import image_and_mask_from_pixel_bag
+from scorch_ext.data_loader import DataLoader
+from scorch_ext.tensor_load_helpers import image_and_mask_from_pixel_bag
 from scorch.scorch_tensor import ScorchTensor
 
 

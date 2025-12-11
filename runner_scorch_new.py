@@ -6,8 +6,8 @@ import numpy as np
 from scorch.scorch_linear import ScorchLinear
 from scorch.scorch_relu import ScorchReLU
 from scorch.scorch_sequential import ScorchSequential
-from scorch.data_loader import DataLoader
-from scorch.tensor_load_helpers import image_and_mask_from_pixel_bag
+from scorch_ext.data_loader import DataLoader
+from scorch_ext.tensor_load_helpers import image_and_mask_from_pixel_bag
 from image.bitmap import Bitmap
 
 

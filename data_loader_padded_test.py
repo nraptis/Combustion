@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scorch.data_loader import DataLoader as ScorchLoader
-from scorch.tensor_load_helpers import (
+from scorch_ext.data_loader import DataLoader as ScorchLoader
+from scorch_ext.tensor_load_helpers import (
     iter_label_patches_from_pair_fixed_size_centered,
 )
 from filesystem.file_utils import FileUtils

@@ -1,4 +1,4 @@
-# scorch/scorch_dataset.py
+# scorch_ext/scorch_dataset.py
 
 from __future__ import annotations
 from typing import List, Tuple, Dict
@@ -6,8 +6,8 @@ from typing import List, Tuple, Dict
 import torch
 from torch.utils.data import Dataset
 
-from scorch.data_loader import DataLoader
-from scorch.tensor_load_helpers import iter_label_patches_from_pair
+from scorch_ext.data_loader import DataLoader
+from scorch_ext.tensor_load_helpers import iter_label_patches_from_pair
 from scorch.scorch_tensor import ScorchTensor
 
 

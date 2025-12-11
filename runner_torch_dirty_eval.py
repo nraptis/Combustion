@@ -11,8 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from scorch.data_loader import DataLoader as ScorchLoader
-from scorch.data_loader import AnnotationImagePair
+from scorch_ext.data_loader import DataLoader as ScorchLoader
+from scorch_ext.data_loader import AnnotationImagePair
 from scorch.scorch_tensor import ScorchTensor
 
 # Reuse config + model from training

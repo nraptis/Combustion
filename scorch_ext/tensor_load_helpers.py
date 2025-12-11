@@ -1,4 +1,4 @@
-# scorch/tensor_load_helpers.py
+# scorch_ext/tensor_load_helpers.py
 
 from __future__ import annotations
 from typing import Iterator, Tuple
@@ -7,8 +7,7 @@ import numpy as np
 from labels.pixel_bag import PixelBag
 from scorch.scorch_tensor import ScorchTensor
 from image.bitmap import Bitmap
-from scorch.data_loader import AnnotationImagePair, DataLoader
-
+from scorch_ext.data_loader import AnnotationImagePair, DataLoader
 
 # -------------------------------------------------------------------
 # Core: mask from PixelBag (cropped to PixelBag.frame)

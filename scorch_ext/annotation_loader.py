@@ -1,4 +1,4 @@
-# scorch/annotation_loader.py
+# scorch_ext/annotation_loader.py
 import json
 from pathlib import Path
 from filesystem.file_io import FileIO

@@ -1,5 +1,5 @@
 # runner_tf.py
-from scorch.data_loader import DataLoader
+from scorch_ext.data_loader import DataLoader
 
 def runner_tf() -> None:
     loader = DataLoader(annotations_subdir="////testing")

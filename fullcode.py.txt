@@ -1,145 +1,5 @@
 # ========== ROOT: /Users/naraptis/Desktop/Combustion/scorch ==========
 
-# ===== annotation_loader.py =====
-
-# scorch/annotation_loader.py
-import json
-from pathlib import Path
-from filesystem.file_io import FileIO
-from labels.image_annotation_document import ImageAnnotationDocument
-
-
-class AnnotationLoadError(Exception):
-    """Raised when an annotation JSON file cannot be parsed or validated."""
-    pass
-
-
-def load_annotation_document(path: str | Path) -> ImageAnnotationDocument:
-    """
-    Load an annotation JSON file safely from an absolute path.
-    - We assume `path` is absolute or resolvable to absolute.
-    """
-    p = Path(path).resolve()
-
-    # --- Stage 1: load raw bytes ---
-    try:
-        raw_bytes = FileIO.load(p)
-    except Exception as e:
-        raise AnnotationLoadError(f"Failed to read file: {p}") from e
-
-    # --- Stage 2: decode UTF-8 ---
-    try:
-        text = raw_bytes.decode("utf-8")
-    except Exception as e:
-        raise AnnotationLoadError(f"Invalid UTF-8 in file: {p}") from e
-
-    # --- Stage 3: JSON parse ---
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise AnnotationLoadError(f"Malformed JSON in file: {p}") from e
-
-    # --- Stage 4: convert to ImageAnnotationDocument ---
-    try:
-        return ImageAnnotationDocument.from_json(data)
-    except Exception as e:
-        raise AnnotationLoadError(
-            f"Invalid annotation structure in file: {p}"
-        ) from e
-
-
-
-# ===== data_loader.py =====
-
-# scorch/data_loader.py
-from __future__ import annotations
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterator, List
-
-from filesystem.file_io import FileIO
-from labels.image_annotation_document import ImageAnnotationDocument
-from .annotation_loader import load_annotation_document, AnnotationLoadError
-
-
-@dataclass
-class AnnotationImagePair:
-    """
-    Holds a full annotation document and the matching image path on disk.
-    """
-    document: ImageAnnotationDocument
-    image_path: Path
-
-# scorch/data_loader.py  (continued)
-
-class DataLoader:
-    """
-    Generic loader that:
-      - finds all annotation JSON files via FileIO.get_all_files_local
-      - loads each into an ImageAnnotationDocument
-      - verifies the corresponding PNG image exists (name + ".png")
-      - yields AnnotationImagePair objects
-    """
-
-    def __init__(self, annotations_subdir: str, images_subdir: str | None = None):
-        """
-        annotations_subdir: project-local subdirectory where *_annotations.json live
-        images_subdir:      project-local subdirectory where PNG images live
-                            (defaults to the same as annotations_subdir)
-        """
-        self.annotations_subdir = annotations_subdir
-        self.images_subdir = images_subdir or annotations_subdir
-
-        # --- Discover annotation files ---
-        all_files: List[Path] = FileIO.get_all_files_local(
-            subdirectory=self.annotations_subdir
-        )
-
-        # Keep only files that look like annotation JSONs.
-        self.annotation_files: List[Path] = sorted(
-            f for f in all_files
-            if f.suffix == ".json" and f.name.endswith("_annotations.json")
-        )
-        
-        seen = set()
-        self.documents = []
-        class_names = set()
-        for annotation_path in self.annotation_files:
-            try:
-                document = load_annotation_document(annotation_path)
-                name = document.name
-                if name in seen:
-                    print("DUPE NAME??? ", name)
-                    continue
-                seen.add(name)
-                self.documents.append(document)
-                for label_name in document.data_label_names:
-                    class_names.add(label_name)
-            except AnnotationLoadError as e:
-                print(f"[DataLoader] Skipping corrupt file: {annotation_path}\n  {e}")
-                continue  # skip but keep going
-        self.class_names = sorted(list(class_names))
-
-    def __len__(self) -> int:
-        return len(self.annotation_files)
-
-    def __iter__(self):
-        for document in self.documents:
-            name = document.name
-
-            # build image path
-            img_rel = Path(self.images_subdir) / f"{name}.png"
-            img_path = FileIO.local_file(name=str(img_rel)).resolve()
-
-            if not img_path.exists():
-                print(f"[DataLoader] Missing PNG for '{name}', skipping.")
-                continue
-
-            yield AnnotationImagePair(document=document, image_path=img_path)
-
-
-
-
 # ===== grad_check.py =====
 
 # scorch/grad_check.py
@@ -1178,84 +1038,6 @@ class ScorchConv2dFast(ScorchModule):
 
 
 
-# ===== scorch_dataset.py =====
-
-# scorch/scorch_dataset.py
-
-from __future__ import annotations
-from typing import List, Tuple, Dict
-
-import torch
-from torch.utils.data import Dataset
-
-from scorch.data_loader import DataLoader
-from scorch.tensor_load_helpers import iter_label_patches_from_pair
-from scorch.scorch_tensor import ScorchTensor
-
-
-class ScorchPatchClassificationDataset(Dataset):
-    """
-    Simple classification dataset:
-      - walks your DataLoader (annotations + images)
-      - uses image patches (from PixelBag frames) as inputs
-      - uses label.name as the class
-      - ignores masks for now (we're just doing classification)
-    """
-
-    def __init__(
-        self,
-        annotations_subdir: str,
-        images_subdir: str | None = None,
-        grayscale: bool = True,
-    ) -> None:
-        super().__init__()
-
-        self.grayscale = grayscale
-        self.class_to_index: Dict[str, int] = {}
-        self.index_to_class: List[str] = []
-        self.samples: List[Tuple[ScorchTensor, int]] = []
-
-        loader = DataLoader(
-            annotations_subdir=annotations_subdir,
-            images_subdir=images_subdir,
-        )
-
-        for pair in loader:
-            for img_tensor, _mask_tensor, label_name in iter_label_patches_from_pair(
-                pair, grayscale=self.grayscale
-            ):
-                class_idx = self._get_or_add_class_index(label_name)
-                self.samples.append((img_tensor, class_idx))
-
-        print(f"[ScorchDataset] Loaded {len(self.samples)} samples "
-              f"from {len(self.class_to_index)} classes.")
-
-    # ----------------------------------------
-    # Internal helpers
-    # ----------------------------------------
-    def _get_or_add_class_index(self, label_name: str) -> int:
-        if label_name not in self.class_to_index:
-            idx = len(self.index_to_class)
-            self.class_to_index[label_name] = idx
-            self.index_to_class.append(label_name)
-        return self.class_to_index[label_name]
-
-    # ----------------------------------------
-    # Dataset interface
-    # ----------------------------------------
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, idx: int):
-        scorch_tensor, class_idx = self.samples[idx]
-
-        # Convert to PyTorch tensor (float32, C,H,W)
-        x = scorch_tensor.to_torch()           # torch.float32, C,H,W
-        y = torch.tensor(class_idx, dtype=torch.long)
-        return x, y
-
-
-
 # ===== scorch_linear.py =====
 
 # scorch/scorch_linear.py
@@ -1526,6 +1308,313 @@ class ScorchLinear(ScorchModule):
 
     def __repr__(self):
         return f"{self.name}(W={self.W.shape}, b={self.b.shape})"
+
+
+
+# ===== scorch_loss.py =====
+
+# scorch/scorch_loss.py
+from __future__ import annotations
+
+from typing import Optional, Union
+import numpy as np
+
+from .scorch_module import ScorchModule
+from .scorch_reduction import ScorchReduction
+
+# Allow both "mean"/"sum"/"none" and ScorchReduction.MEAN etc.
+ReductionLike = Union[str, ScorchReduction]
+
+
+class ScorchLoss(ScorchModule):
+    """
+    Base class for Scorch loss functions.
+
+    - Subclasses should implement forward(input, target).
+    - Training code should NOT call .backward() on loss modules in this framework.
+      Instead, use dedicated functional helpers (e.g. cross_entropy_with_grad)
+      that return both (loss, grad_input).
+
+    Attributes:
+        reduction: ScorchReduction enum (NONE | MEAN | SUM)
+    """
+
+    def __init__(self, reduction: ReductionLike = ScorchReduction.MEAN) -> None:
+        super().__init__()
+
+        # Normalize to enum
+        if isinstance(reduction, ScorchReduction):
+            self.reduction: ScorchReduction = reduction
+        else:
+            # assume string-like
+            try:
+                self.reduction = ScorchReduction(str(reduction).lower())
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid reduction: {reduction!r}. "
+                    f"Expected one of: {[r.value for r in ScorchReduction]}"
+                ) from e
+
+    # PyTorch-style call semantics: loss(input, target)
+    def forward(self, input: np.ndarray, target: np.ndarray):
+        """
+        Compute the loss.
+
+        Subclasses must override this method.
+
+        Typical behavior:
+          - If reduction == NONE: return per-sample losses, shape (N,).
+          - If reduction == MEAN or SUM: return a scalar float.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__}.forward not implemented.")
+
+    def backward(self, grad_output) -> None:
+        """
+        For now we DO NOT support calling backward() on loss modules.
+
+        In Scorch, the typical pattern is:
+            loss, grad_logits = cross_entropy_with_grad(logits, targets)
+
+        So if this gets called accidentally, we want a loud failure,
+        not a silent no-op.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}.backward is not supported. "
+            "Use explicit functional helpers that return (loss, grad_input)."
+        )
+
+    # --------------------------------------------------
+    # Helpers for subclasses
+    # --------------------------------------------------
+    def _reduce(self, per_sample: np.ndarray) -> float | np.ndarray:
+        """
+        Apply reduction (NONE | MEAN | SUM) to a 1D array of per-sample losses.
+        """
+        per_sample = np.asarray(per_sample, dtype=np.float32)
+
+        # If already scalar, just return float
+        if per_sample.ndim == 0:
+            return float(per_sample)
+
+        match self.reduction:
+            case ScorchReduction.MEAN:
+                if per_sample.size == 0:
+                    # You could choose np.nan here to mimic PyTorch more strictly
+                    return 0.0
+                return float(per_sample.mean())
+
+            case ScorchReduction.SUM:
+                if per_sample.size == 0:
+                    return 0.0
+                return float(per_sample.sum())
+
+            case ScorchReduction.NONE:
+                return per_sample
+
+            case _:
+                # Should be impossible if __init__ is correct
+                raise RuntimeError(f"Unknown reduction: {self.reduction}")
+
+    def parameters(self):
+        """
+        Loss modules don't have learnable parameters in this engine.
+        """
+        return []
+
+    def zero_grad(self) -> None:
+        """
+        Nothing to reset for stateless loss modules.
+        """
+        # No-op; keeps ScorchModule contract satisfied.
+        pass
+
+
+class ScorchWeightedLoss(ScorchLoss):
+    """
+    Base class for losses that support per-class weights, like CrossEntropyLoss.
+
+    Attributes:
+        weight: Optional np.ndarray of shape (num_classes,)
+    """
+
+    def __init__(
+        self,
+        weight: Optional[np.ndarray] = None,
+        reduction: ReductionLike = ScorchReduction.MEAN,
+    ) -> None:
+        super().__init__(reduction=reduction)
+
+        if weight is not None:
+            w = np.asarray(weight, dtype=np.float32)
+            if w.ndim != 1:
+                raise ValueError(
+                    f"weight must be 1D (num_classes,), got shape {w.shape}"
+                )
+            self.weight: Optional[np.ndarray] = w
+        else:
+            self.weight = None
+
+
+# -------------------------------------------------------------------
+# Functional: cross_entropy_with_grad
+# -------------------------------------------------------------------
+
+def cross_entropy_with_grad(
+    logits: np.ndarray,
+    targets: np.ndarray,
+    weight: Optional[np.ndarray] = None,
+    reduction: ReductionLike = ScorchReduction.MEAN,
+) -> tuple[float | np.ndarray, np.ndarray]:
+    """
+    Cross-entropy loss + gradient w.r.t. logits (like torch.nn.CrossEntropyLoss).
+
+    Args:
+        logits:  (N, C) float32 - raw scores from the final layer.
+        targets: (N,) int64     - class indices in [0, C).
+        weight:  Optional (C,) float32 - per-class weights.
+        reduction: "none" | "mean" | "sum" or ScorchReduction enum.
+
+    Returns:
+        loss:
+            - scalar float if reduction is "mean" or "sum"
+            - (N,) float32 array if reduction is "none"
+        grad_logits: (N, C) float32 - dL/d(logits)
+    """
+    logits = np.asarray(logits, dtype=np.float32)
+    targets = np.asarray(targets, dtype=np.int64)
+
+    if logits.ndim != 2:
+        raise ValueError(f"Expected logits shape (N, C), got {logits.shape}")
+    if targets.ndim != 1:
+        raise ValueError(f"Expected targets shape (N,), got {targets.shape}")
+
+    N, C = logits.shape
+    if targets.shape[0] != N:
+        raise ValueError(
+            f"Targets length {targets.shape[0]} does not match batch size {N}"
+        )
+
+    # Normalize reduction to enum
+    if isinstance(reduction, ScorchReduction):
+        reduction_enum = reduction
+    else:
+        reduction_enum = ScorchReduction(str(reduction).lower())
+
+    # ------------------------------------
+    # Softmax probabilities (stable)
+    # ------------------------------------
+    shifted = logits - np.max(logits, axis=1, keepdims=True)  # (N, C)
+    exp = np.exp(shifted, dtype=np.float32)
+    probs = exp / np.sum(exp, axis=1, keepdims=True)          # (N, C)
+
+    # ------------------------------------
+    # Per-sample losses
+    # ------------------------------------
+    eps = 1e-12
+    p_correct = probs[np.arange(N), targets] + eps  # (N,)
+    per_sample_loss = -np.log(p_correct, dtype=np.float32)    # (N,)
+
+    if weight is not None:
+        weight = np.asarray(weight, dtype=np.float32)
+        if weight.shape != (C,):
+            raise ValueError(
+                f"weight must have shape (C,), got {weight.shape}, C={C}"
+            )
+        sample_weights = weight[targets]                    # (N,)
+        per_sample_loss = per_sample_loss * sample_weights  # weighted losses
+    else:
+        sample_weights = np.ones_like(per_sample_loss, dtype=np.float32)
+
+    # ------------------------------------
+    # Reduction
+    # ------------------------------------
+    if reduction_enum is ScorchReduction.NONE:
+        loss: float | np.ndarray = per_sample_loss.astype(np.float32)
+        normalizer = np.ones_like(sample_weights, dtype=np.float32)  # no scaling
+        denom = 1.0  # not used
+    else:
+        if weight is not None:
+            # PyTorch-style: mean = sum(weighted_losses) / sum(sample_weights)
+            weight_sum = float(np.sum(sample_weights))
+            if weight_sum <= 0.0:
+                # Degenerate; avoid div-zero
+                mean_loss = 0.0
+                denom = 1.0
+            else:
+                mean_loss = float(np.sum(per_sample_loss) / weight_sum)
+                denom = weight_sum
+        else:
+            mean_loss = float(per_sample_loss.mean())
+            denom = float(N)
+
+        if reduction_enum is ScorchReduction.MEAN:
+            loss = mean_loss
+        elif reduction_enum is ScorchReduction.SUM:
+            loss = float(np.sum(per_sample_loss))
+            denom = 1.0  # sum => no global scale in grad
+        else:
+            raise RuntimeError(f"Unknown reduction: {reduction_enum}")
+
+        # For gradient scaling below
+        normalizer = np.full_like(sample_weights, denom, dtype=np.float32)
+
+    # ------------------------------------
+    # Gradient w.r.t. logits
+    # ------------------------------------
+    grad_logits = probs.copy()                              # (N, C)
+    grad_logits[np.arange(N), targets] -= 1.0               # probs - one_hot
+
+    # Apply sample weights (if any)
+    grad_logits *= sample_weights[:, None]                  # (N, C)
+
+    # Apply reduction scaling:
+    # - NONE: normalizer is 1 -> no scaling
+    # - MEAN: divide by sum(weights) or N
+    # - SUM:  denom=1 -> no extra scaling
+    grad_logits /= normalizer[:, None]
+
+    return loss, grad_logits.astype(np.float32)
+
+
+# -------------------------------------------------------------------
+# Module: ScorchCrossEntropyLoss
+# -------------------------------------------------------------------
+
+class ScorchCrossEntropyLoss(ScorchWeightedLoss):
+    """
+    Module wrapper around cross_entropy_with_grad, like torch.nn.CrossEntropyLoss
+    (but WITHOUT autograd integration).
+
+    Usage pattern 1 (recommended for training):
+        loss, grad_logits = cross_entropy_with_grad(logits, targets, weight, reduction)
+        # use grad_logits for backprop via ScorchSequential.backward(...)
+
+    Usage pattern 2 (for metric-style use):
+        criterion = ScorchCrossEntropyLoss()
+        loss_value = criterion.forward(logits, targets)
+    """
+
+    def __init__(
+        self,
+        weight: Optional[np.ndarray] = None,
+        reduction: ReductionLike = ScorchReduction.MEAN,
+    ) -> None:
+        super().__init__(weight=weight, reduction=reduction)
+
+    def forward(self, input: np.ndarray, target: np.ndarray):
+        """
+        Compute the cross-entropy loss value (no gradient).
+
+        For gradient + loss together, call cross_entropy_with_grad(...)
+        directly instead of going through this module.
+        """
+        loss, _ = cross_entropy_with_grad(
+            logits=input,
+            targets=target,
+            weight=self.weight,
+            reduction=self.reduction,
+        )
+        return loss
 
 
 
@@ -2219,6 +2308,108 @@ class ScorchModule:
 
 
 
+# ===== scorch_optimizer.py =====
+
+# scorch_optimizer.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Iterable, List
+import numpy as np
+
+
+@dataclass
+class TorchParam:
+    """
+    Minimal 'parameter' wrapper for Scorch-style tensors.
+
+    data: np.ndarray holding the actual weights.
+    grad: np.ndarray of the same shape, filled by your backward pass.
+    """
+    data: np.ndarray
+    grad: np.ndarray | None = None
+
+
+class ScorchOptimizer:
+    """
+    Minimal PyTorch-style optimizer base class.
+
+    - Holds a flat list of TorchParam objects (or anything with .data / .grad).
+    - Provides zero_grad().
+    - Child classes implement step().
+    """
+
+    def __init__(self, params: Iterable[TorchParam], lr: float = 1e-3) -> None:
+        self.params: List[TorchParam] = list(params)
+        if len(self.params) == 0:
+            raise ValueError("ScorchOptimizer got an empty parameter list.")
+        self.lr: float = float(lr)
+
+    def zero_grad(self) -> None:
+        """
+        Set all gradients to zero (in-place), if they exist.
+        """
+        for p in self.params:
+            if p.grad is not None:
+                p.grad[...] = 0.0
+
+    def step(self) -> None:
+        """
+        Perform a single optimization step.
+
+        Must be overridden by subclasses.
+        """
+        raise NotImplementedError("ScorchOptimizer.step() must be implemented by subclasses.")
+
+
+
+# ===== scorch_reduction.py =====
+
+# scorch/scorch_reduction.py
+from __future__ import annotations
+from enum import Enum
+
+
+class ScorchReduction(str, Enum):
+    """
+    Enum representing how a loss should be reduced.
+
+    - NONE  => return per-sample losses, shape (N,)
+    - MEAN  => return a single scalar (average)
+    - SUM   => return a single scalar (sum)
+
+    Matches PyTorch's Reduction enum in spirit.
+    """
+
+    NONE = "none"
+    MEAN = "mean"
+    SUM = "sum"
+
+    @staticmethod
+    def from_value(val: str | ScorchReduction) -> ScorchReduction:
+        """
+        Accepts either:
+            - a ScorchReduction enum value
+            - or a string ("none", "mean", "sum")
+
+        Converts and returns a ScorchReduction.
+        """
+        if isinstance(val, ScorchReduction):
+            return val
+
+        if isinstance(val, str):
+            val_lower = val.lower()
+            for r in ScorchReduction:
+                if r.value == val_lower:
+                    return r
+
+        raise ValueError(
+            f"Invalid reduction: {val!r}. "
+            f"Expected one of: {[r.value for r in ScorchReduction]}"
+        )
+
+
+
 # ===== scorch_relu.py =====
 
 # scorch/scorch_relu.py
@@ -2887,1019 +3078,109 @@ class ScorchTensor:
 
 
 
-# ===== tensor_load_helpers.py =====
+# ===== torch_adam.py =====
 
-# scorch/tensor_load_helpers.py
-
+# torch_adam.py
 from __future__ import annotations
-from typing import Iterator, Tuple
+
+from typing import Iterable, List, Tuple
 import numpy as np
 
-from labels.pixel_bag import PixelBag
-from scorch.scorch_tensor import ScorchTensor
-from image.bitmap import Bitmap
-from scorch.data_loader import AnnotationImagePair, DataLoader
+from .scorch_optimizer import ScorchOptimizer, TorchParam
 
-
-# -------------------------------------------------------------------
-# Core: mask from PixelBag (cropped to PixelBag.frame)
-# -------------------------------------------------------------------
-def mask_tensor_from_pixel_bag(
-    bag: PixelBag,
-    name: str | None = None,
-) -> ScorchTensor:
+class TorchAdam(ScorchOptimizer):
     """
-    Create a 1 x H x W mask tensor cropped to the PixelBag's frame.
-    Pixels in the bag -> 1.0, everything else -> 0.0.
-    """
-    x0, y0, w, h = bag.frame
+    Minimal Adam optimizer (NumPy / Scorch-friendly).
 
-    if w == 0 or h == 0:
-        return ScorchTensor(
-            np.zeros((0,), dtype=np.float32),
-            name=name,
-            role="mask",
-        )
+    Matches the standard Adam update:
 
-    mask = np.zeros((1, h, w), dtype=np.float32)
+        m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
+        v_t = beta2 * v_{t-1} + (1 - beta2) * (g_t ** 2)
 
-    for x, y in bag:
-        mx = x - x0  # local coords inside bbox
-        my = y - y0
-        if 0 <= mx < w and 0 <= my < h:
-            mask[0, my, mx] = 1.0
+        m_hat = m_t / (1 - beta1 ** t)
+        v_hat = v_t / (1 - beta2 ** t)
 
-    return ScorchTensor(mask, name=name, role="mask")
-
-
-# -------------------------------------------------------------------
-# Core: mask from PixelBag (fixed size, centered)
-# -------------------------------------------------------------------
-def mask_tensor_from_pixel_bag_fixed_size_centered(
-    bag: PixelBag,
-    fixed_width: int,
-    fixed_height: int,
-    name: str | None = None,
-) -> ScorchTensor:
-    """
-    Create a 1 x fixed_height x fixed_width mask tensor.
-
-    Steps:
-      - Build the tight mask cropped to PixelBag.frame (same as
-        mask_tensor_from_pixel_bag).
-      - Place that mask centered inside a larger canvas of size
-        (1, fixed_height, fixed_width).
-      - The rest is zeros.
-
-    Assumes that bag.frame width/height <= fixed_width / fixed_height.
-    """
-    x0, y0, w, h = bag.frame
-
-    if w == 0 or h == 0:
-        # Empty bag -> all zeros mask of requested size
-        mask = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
-        return ScorchTensor(mask, name=name, role="mask_fixed_size_centered")
-
-    if w > fixed_width or h > fixed_height:
-        raise ValueError(
-            f"mask_tensor_from_pixel_bag_fixed_size_centered: "
-            f"bag frame size ({w},{h}) exceeds fixed size "
-            f"({fixed_width},{fixed_height})"
-        )
-
-    # Local tight mask
-    tight = mask_tensor_from_pixel_bag(
-        bag=bag,
-        name=name,
-    )
-    tight_arr = tight.to_numpy()  # (1,h,w)
-
-    mask = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
-
-    # Center placement
-    dx = fixed_width // 2 - w // 2
-    dy = fixed_height // 2 - h // 2
-
-    mask[:, dy:dy + h, dx:dx + w] = tight_arr
-
-    return ScorchTensor(mask, name=name, role="mask_fixed_size_centered")
-
-
-# -------------------------------------------------------------------
-# Core: image + mask from PixelBag (one label, tight frame)
-# -------------------------------------------------------------------
-def image_and_mask_from_pixel_bag(
-    bmp: Bitmap,
-    bag: PixelBag,
-    name: str | None = None,
-    grayscale: bool = True,
-) -> Tuple[ScorchTensor, ScorchTensor]:
-    """
-    Return (image_patch, mask_patch) for a single PixelBag.
-
-    Both tensors are cropped to PixelBag.frame and share the same H, W.
-    """
-    x0, y0, w, h = bag.frame
-
-    if w == 0 or h == 0:
-        empty = ScorchTensor(
-            np.zeros((0,), dtype=np.float32),
-            name=name,
-            role="empty",
-        )
-        return empty, empty
-
-    # Defensive clamp to bitmap bounds
-    x0 = max(0, min(x0, bmp.width  - w))
-    y0 = max(0, min(y0, bmp.height - h))
-
-    img_tensor = ScorchTensor.from_bitmap_crop(
-        bmp=bmp,
-        x=x0,
-        y=y0,
-        width=w,
-        height=h,
-        name=f"{name}_img" if name else None,
-        role="image_patch",
-        grayscale=grayscale,
-    )
-
-    mask_tensor = mask_tensor_from_pixel_bag(
-        bag=bag,
-        name=f"{name}_mask" if name else None,
-    )
-
-    # Simple shape sanity check
-    _, h_m, w_m = mask_tensor.shape
-    _, h_i, w_i = img_tensor.shape
-    if (h_m, w_m) != (h_i, w_i):
-        raise ValueError(
-            f"Mask/image size mismatch: mask=({h_m},{w_m}), image=({h_i},{w_i})"
-        )
-
-    return img_tensor, mask_tensor
-
-
-# -------------------------------------------------------------------
-# Core: image + mask from PixelBag (fixed slab, centered)
-# -------------------------------------------------------------------
-def image_and_mask_from_pixel_bag_fixed_size_centered(
-    bmp: Bitmap,
-    bag: PixelBag,
-    fixed_width: int,
-    fixed_height: int,
-    name: str | None = None,
-    grayscale: bool = True,
-) -> Tuple[ScorchTensor, ScorchTensor]:
-    """
-    Return (image_patch_fixed_size_centered, mask_patch_fixed_size_centered)
-    for a single PixelBag.
-
-    Steps:
-      - Crop the bitmap to the PixelBag.frame (tight bounding box).
-      - Verify that the frame fits inside the requested fixed size.
-      - Create a new Bitmap(fixed_width, fixed_height).
-      - Center-stamp the cropped bitmap into the fixed-size bitmap using:
-            stamp_x = fixed_width  // 2 - w // 2
-            stamp_y = fixed_height // 2 - h // 2
-      - Build a matching fixed-size mask where the tight mask is
-        placed at the same centered location.
-
-    Result:
-      - image_patch_fixed_size_centered: ScorchTensor, (C, fixed_height, fixed_width)
-      - mask_patch_fixed_size_centered:  ScorchTensor, (1, fixed_height, fixed_width)
-    """
-    x0, y0, w, h = bag.frame
-
-    if w == 0 or h == 0:
-        # Empty bag -> just return all-zero tensors of the fixed size
-        img_arr = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
-        mask_arr = np.zeros((1, fixed_height, fixed_width), dtype=np.float32)
-        img_tensor = ScorchTensor(
-            img_arr,
-            name=f"{name}_img_fixed_size_centered" if name else None,
-            role="image_patch_fixed_size_centered",
-        )
-        mask_tensor = ScorchTensor(
-            mask_arr,
-            name=f"{name}_mask_fixed_size_centered" if name else None,
-            role="mask_fixed_size_centered",
-        )
-        return img_tensor, mask_tensor
-
-    if w > fixed_width or h > fixed_height:
-        raise ValueError(
-            f"image_and_mask_from_pixel_bag_fixed_size_centered: "
-            f"bag frame size ({w},{h}) exceeds fixed size "
-            f"({fixed_width},{fixed_height})"
-        )
-
-    # Defensive clamp to bitmap bounds, same as non-fixed helper
-    x0 = max(0, min(x0, bmp.width  - w))
-    y0 = max(0, min(y0, bmp.height - h))
-
-    # 1) Tight crop around the bag
-    cropped = bmp.crop(
-        x=x0,
-        y=y0,
-        width=w,
-        height=h,
-    )
-
-    # 2) New fixed-size bitmap and center stamp
-    padded = Bitmap(fixed_width, fixed_height)
-
-    stamp_x = fixed_width // 2 - cropped.width // 2
-    stamp_y = fixed_height // 2 - cropped.height // 2
-
-    padded.stamp(cropped, stamp_x, stamp_y)
-
-    # 3) Convert to ScorchTensor
-    img_tensor = ScorchTensor.from_bitmap(
-        bmp=padded,
-        name=f"{name}_img_fixed_size_centered" if name else None,
-        role="image_patch_fixed_size_centered",
-        grayscale=grayscale,
-    )
-
-    # 4) Matching fixed-size mask
-    mask_tensor = mask_tensor_from_pixel_bag_fixed_size_centered(
-        bag=bag,
-        fixed_width=fixed_width,
-        fixed_height=fixed_height,
-        name=f"{name}_mask_fixed_size_centered" if name else None,
-    )
-
-    # Final sanity check: shapes must match
-    _, h_m, w_m = mask_tensor.shape
-    _, h_i, w_i = img_tensor.shape
-    if (h_m, w_m) != (h_i, w_i):
-        raise ValueError(
-            f"Fixed-size mask/image size mismatch: "
-            f"mask=({h_m},{w_m}), image=({h_i},{w_i})"
-        )
-
-    return img_tensor, mask_tensor
-
-
-# -------------------------------------------------------------------
-# High-level: iterate (image_patch, mask_patch, label_name) over a pair
-# -------------------------------------------------------------------
-def iter_label_patches_from_pair(
-    pair: AnnotationImagePair,
-    grayscale: bool = True,
-):
-    """
-    Yield (image_patch, mask_patch, label_name) for every label
-    in a single AnnotationImagePair.
-
-    Uses the tight PixelBag.frame (no padding).
-    """
-    bmp = Bitmap.with_image(pair.image_path)
-    doc = pair.document
-
-    # Adjust attribute names if your document layout differs
-    for label in doc.data.labels:
-        bag = label.pixel_bag
-        img_patch, mask_patch = image_and_mask_from_pixel_bag(
-            bmp=bmp,
-            bag=bag,
-            name=label.name,
-            grayscale=grayscale,
-        )
-        yield img_patch, mask_patch, label.name
-
-
-# -------------------------------------------------------------------
-# High-level: iterate fixed-size centered patches over a pair
-# -------------------------------------------------------------------
-def iter_label_patches_from_pair_fixed_size_centered(
-    pair: AnnotationImagePair,
-    fixed_width: int,
-    fixed_height: int,
-    grayscale: bool = True,
-):
-    """
-    Yield (image_patch_fixed_size_centered, mask_patch_fixed_size_centered,
-    label_name) for every label in a single AnnotationImagePair.
-
-    Each patch is exactly (fixed_height, fixed_width) with the original
-    PixelBag.frame content centered in the slab.
-    """
-    bmp = Bitmap.with_image(pair.image_path)
-    doc = pair.document
-
-    for label in doc.data.labels:
-        bag = label.pixel_bag
-        img_patch, mask_patch = image_and_mask_from_pixel_bag_fixed_size_centered(
-            bmp=bmp,
-            bag=bag,
-            fixed_width=fixed_width,
-            fixed_height=fixed_height,
-            name=label.name,
-            grayscale=grayscale,
-        )
-        yield img_patch, mask_patch, label.name
-
-
-
-# ========== ROOT: /Users/naraptis/Desktop/Combustion/labels ==========
-
-# ===== data_label.py =====
-
-# data_label.py
-from __future__ import annotations
-
-from typing import Any, Dict
-from labels.pixel_bag import PixelBag
-
-class DataLabel:
-    """
-    Associates a string name with a PixelBag.
-
-    JSON format:
-
-        {
-            "name": "some_label_name",
-            "pixels": [ { "y": ..., "x_start": ..., "x_end": ... }, ... ]
-        }
-    """
-
-    def __init__(self, name: str, pixel_bag: PixelBag | None = None) -> None:
-        self.name: str = name
-        self.pixel_bag: PixelBag = pixel_bag if pixel_bag is not None else PixelBag()
-
-
-    # --------------------------------------------------
-    # PixelBag passthrough wrappers
-    # --------------------------------------------------
-    def clear(self) -> None:
-        self.pixel_bag.clear()
-
-    def add(self, x: int, y: int) -> None:
-        self.pixel_bag.add(x, y)
-
-    def remove(self, x: int, y: int) -> None:
-        self.pixel_bag.remove(x, y)
-
-    def contains(self, x: int, y: int) -> bool:
-        return self.pixel_bag.contains(x, y)
-
-    # --------------------------------------------------
-    # JSON serialization
-    # --------------------------------------------------
-    def to_json(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "pixels": self.pixel_bag.to_json(),
-        }
-
-    @staticmethod
-    def from_json(data: Dict[str, Any]) -> "DataLabel":
-        name = data.get("name", "")
-        pixels_json = data.get("pixels", [])
-        bag = PixelBag.from_json(pixels_json)
-        return DataLabel(name=name, pixel_bag=bag)
-
-    # --------------------------------------------------
-    # Utility / debug printing (summary style)
-    # --------------------------------------------------
-    def __repr__(self) -> str:
-        """
-        One-line compact summary, e.g.:
-
-            DataLabel(name="lymph",
-                      bag=PixelBag(count=100, median=(15,35), size=(10,10)))
-
-        If bag is empty:
-
-            DataLabel(name="lymph", bag=PixelBag(count=0))
-        """
-        return f'DataLabel(name="{self.name}", bag={self.pixel_bag})'
-
-
-
-# ===== data_label_collection.py =====
-
-# data_label_collection.py
-from __future__ import annotations
-
-from typing import Any, Dict, List, Iterable
-
-from labels.data_label import DataLabel
-
-class DataLabelCollection:
-    """
-    A simple list of DataLabel objects.
-
-    Multiple labels may share the same name. Each DataLabel typically
-    represents one instance (one PixelBag region).
-    """
-
-    def __init__(self, labels: List[DataLabel] | None = None) -> None:
-        self.labels: List[DataLabel] = labels or []
-
-    # --------------------------------------------------
-    # Basic operations
-    # --------------------------------------------------
-    def add_label(self, label: DataLabel) -> None:
-        """
-        Append a label. Multiple labels may have the same name.
-        """
-        self.labels.append(label)
-
-    def remove_label(self, label: DataLabel) -> None:
-        """
-        Remove this exact label object from the collection, if present.
-        Does nothing if the label is not in the collection.
-        """
-        try:
-            self.labels.remove(label)
-        except ValueError:
-            # label not in list; ignore
-            pass
-
-    def get_labels_by_name(self, name: str) -> List[DataLabel]:
-        """
-        Return all labels whose name matches the given name.
-        May return an empty list.
-        """
-        return [lbl for lbl in self.labels if lbl.name == name]
-
-    def first_label(self, name: str) -> DataLabel | None:
-        """
-        Convenience: return the first label with this name, or None.
-        """
-        for lbl in self.labels:
-            if lbl.name == name:
-                return lbl
-        return None
-
-    # --------------------------------------------------
-    # JSON serialization (array only)
-    # --------------------------------------------------
-    def to_json(self) -> List[Dict[str, Any]]:
-        """
-        Return a JSON-compatible list of label dicts, no wrapper.
-        """
-        return [label.to_json() for label in self.labels]
-
-    @staticmethod
-    def from_json(data: List[Dict[str, Any]]) -> "DataLabelCollection":
-        """
-        Parse a list of label objects.
-        """
-        labels = [DataLabel.from_json(item) for item in data]
-        return DataLabelCollection(labels=labels)
-
-    # --------------------------------------------------
-    # Helpers
-    # --------------------------------------------------
-    def __len__(self):
-        return len(self.labels)
-
-    def __iter__(self) -> Iterable[DataLabel]:
-        return iter(self.labels)
-
-    def _sorted_labels(self) -> List[DataLabel]:
-        """
-        Return labels sorted by:
-          1) name (alphabetical)
-          2) median.y  (ascending)
-          3) median.x  (ascending)
-
-        Uses PixelBag.summary().median so we don't have to look at stripes.
-        Empty bags get a large sentinel so they sort last within a name.
-        """
-        if not self.labels:
-            return []
-
-        def sort_key(label: DataLabel):
-            name = label.name
-            summary = label.pixel_bag.summary()
-            median = summary.get("median")
-
-            if median is None:
-                # Empty bag: push to the end for that name
-                my = 10**9
-                mx = 10**9
-            else:
-                mx, my = median  # median is (x, y)
-
-            return (name, my, mx)
-
-        return sorted(self.labels, key=sort_key)
-
-    def __repr__(self) -> str:
-        """
-        Compact summary of the collection plus one-line summary per label, e.g.:
-
-            DataLabelCollection(count=2):
-                DataLabel(name="basal", bag=PixelBag(...))
-                DataLabel(name="lymph", bag=PixelBag(...))
-        """
-        count = len(self.labels)
-        if count == 0:
-            return "DataLabelCollection(count=0)"
-
-        lines: List[str] = [f"DataLabelCollection(count={count}):"]
-        for label in self._sorted_labels():
-            lines.append(f"    {label!r}")
-        return "\n".join(lines)
-    
-
-
-# ===== image_annotation_document.py =====
-
-# image_annotation_document.py
-from __future__ import annotations
-
-from typing import Any, Dict, List
-from labels.data_label_collection import DataLabelCollection
-
-class ImageAnnotationDocument:
-    """
-    Top-level container for annotations for a single image.
-
-    Fields:
-      - name:             Logical name for this document (often the JSON filename).
-      - width:            Image width in pixels.
-      - height:           Image height in pixels.
-      - data:             DataLabelCollection holding all individual labels.
-      - data_label_names: Derived list of label names present in `data`.
+        param = param - lr * m_hat / (sqrt(v_hat) + eps)
     """
 
     def __init__(
         self,
-        name: str,
-        width: int,
-        height: int,
-        data: DataLabelCollection | None = None,
+        params: Iterable[TorchParam],
+        lr: float = 1e-3,
+        betas: Tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
+        weight_decay: float = 0.0,
     ) -> None:
-        self.name: str = name
-        self.width: int = int(width)
-        self.height: int = int(height)
-        # data is conceptually non-optional; default to empty collection if None
-        self.data: DataLabelCollection = data if data is not None else DataLabelCollection()
+        super().__init__(params, lr=lr)
 
-    # --------------------------------------------------
-    # Derived properties
-    # --------------------------------------------------
-    @property
-    def data_label_names(self) -> List[str]:
+        beta1, beta2 = betas
+        if not 0.0 <= beta1 < 1.0:
+            raise ValueError(f"Invalid beta1: {beta1}")
+        if not 0.0 <= beta2 < 1.0:
+            raise ValueError(f"Invalid beta2: {beta2}")
+        if not 0.0 <= eps:
+            raise ValueError(f"Invalid eps: {eps}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"Invalid weight_decay: {weight_decay}")
+
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        self.eps = float(eps)
+        self.weight_decay = float(weight_decay)
+
+        # One state tuple per parameter: (m, v, step)
+        self._m: List[np.ndarray] = []
+        self._v: List[np.ndarray] = []
+        self._step: List[int] = []
+
+        for p in self.params:
+            # Lazily initialize state to zeros of matching shape
+            self._m.append(np.zeros_like(p.data, dtype=np.float32))
+            self._v.append(np.zeros_like(p.data, dtype=np.float32))
+            self._step.append(0)
+
+    def step(self) -> None:
         """
-        Return a sorted list of unique label names present in this document's data.
+        Perform a single Adam update on all parameters.
+        Assumes .grad has been filled for each TorchParam (or left None).
         """
-        names = {label.name for label in self.data}
-        return sorted(names)
-
-    # --------------------------------------------------
-    # JSON serialization
-    # --------------------------------------------------
-    def to_json(self) -> Dict[str, Any]:
-        """
-        Return a JSON-compatible dict representing this document.
-
-        Layout:
-
-        {
-          "name":             str,
-          "width":            int,
-          "height":           int,
-          "data_label_names": [str, ...],
-          "labels":           [ ... DataLabel.to_json() ... ]
-        }
-
-        Note: data_label_names is derived from `data` at serialization time.
-        """
-        return {
-            "name": self.name,
-            "width": self.width,
-            "height": self.height,
-            "data_label_names": self.data_label_names,
-            "labels": self.data.to_json(),
-        }
-
-    @staticmethod
-    def from_json(data: Dict[str, Any]) -> "ImageAnnotationDocument":
-        """
-        Parse an ImageAnnotationDocument from a JSON-compatible dict.
-
-        data_label_names from JSON are currently ignored as a source of truth,
-        since they can always be recomputed from the label data. They are
-        still read (if present) to allow future validation if desired.
-        """
-        name = data.get("name", "")
-        width = int(data.get("width", 0))
-        height = int(data.get("height", 0))
-
-        labels_raw = data.get("labels", []) or []
-        dlc = DataLabelCollection.from_json(labels_raw)
-
-        # data_label_names = data.get("data_label_names", [])  # optional; not required
-
-        return ImageAnnotationDocument(
-            name=name,
-            width=width,
-            height=height,
-            data=dlc,
-        )
-
-    # --------------------------------------------------
-    # Debug / repr
-    # --------------------------------------------------
-    def __repr__(self) -> str:
-        """
-        Compact summary plus an indented listing of labels via
-        DataLabelCollection.__repr__.
-
-        Example:
-
-            ImageAnnotationDocument(name="sample_01",
-                                    size=(256, 256),
-                                    data_label_names=['Alphacyte', 'Lymphocyte'],
-                                    label_count=3):
-                DataLabel(name="Alphacyte", bag=PixelBag(...))
-                DataLabel(name="Lymphocyte", bag=PixelBag(...))
-                ...
-        """
-        label_count = len(self.data)
-        header = (
-            f'ImageAnnotationDocument('
-            f'name="{self.name}", '
-            f'size=({self.width}, {self.height}), '
-            f'data_label_names={self.data_label_names}, '
-            f'label_count={label_count})'
-        )
-
-        if label_count == 0:
-            return header
-
-        # Indent the DataLabelCollection repr by 4 spaces
-        dlc_lines = repr(self.data).splitlines()
-        indented_dlc = "\n".join("    " + line for line in dlc_lines)
-
-        return header + ":\n" + indented_dlc
-
-
-
-# ===== pixel_bag.py =====
-
-# pixel_bag.py
-from __future__ import annotations
-from typing import Any, List
-from labels.pixel_bag_run_length import PixelBagRunLength
-from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
-
-class PixelBag:
-    """
-    Stores a set of (x, y) integer pixel positions.
-    Does not store duplicates (internally a set),
-    but add/remove semantics allow double-add and remove-nonexistent
-    without raising exceptions.
-    """
-
-    def __init__(self) -> None:
-        self._set = set()   # stores (x, y)
-
-    # --------------------------------------------------
-    # Basic operations
-    # --------------------------------------------------
-    def clear(self) -> None:
-        self._set.clear()
-
-    def add(self, x: int, y: int) -> None:
-        """Add a pixel. Adding an existing pixel is allowed and ignored."""
-        self._set.add((int(x), int(y)))
-
-    def remove(self, x: int, y: int) -> None:
-        """Remove a pixel. Removing a missing pixel is allowed and ignored."""
-        self._set.discard((int(x), int(y)))  # discard() never raises
-
-    def contains(self, x: int, y: int) -> bool:
-        """Check if a pixel exists in the bag."""
-        return (int(x), int(y)) in self._set
-
-    # --------------------------------------------------
-    # Bounding box helpers
-    # --------------------------------------------------
-    @property
-    def xmin(self):
-        if not self._set:
-            return None
-        return min(px for (px, _) in self._set)
-
-    @property
-    def xmax(self):
-        if not self._set:
-            return None
-        return max(px for (px, _) in self._set)
-
-    @property
-    def ymin(self):
-        if not self._set:
-            return None
-        return min(py for (_, py) in self._set)
-
-    @property
-    def ymax(self):
-        if not self._set:
-            return None
-        return max(py for (_, py) in self._set)
-    
-    @property
-    def frame(self):
-        if not self._set:
-            return (0, 0, 0, 0)
-
-        xr = self.xrange()
-        yr = self.yrange()
-        
-        width  = xr.stop - xr.start
-        height = yr.stop - yr.start
-
-        return (xr.start, yr.start, width, height)
-
-    # --------------------------------------------------
-    # Ranges for easy looping
-    # --------------------------------------------------
-    def xrange(self):
-        """
-        Return range(xmin, xmax+1).
-        If empty, return range(0).
-        """
-        if not self._set:
-            return range(0)
-        return range(self.xmin, self.xmax + 1)
-
-    def yrange(self):
-        """
-        Return range(ymin, ymax+1).
-        If empty, return range(0).
-        """
-        if not self._set:
-            return range(0)
-        return range(self.ymin, self.ymax + 1)
-
-    # --------------------------------------------------
-    # Utility
-    # --------------------------------------------------
-    def __len__(self):
-        return len(self._set)
-
-    def __iter__(self):
-        """Iterate over (x, y) pairs."""
-        return iter(self._set)
-
-    def summary(self) -> dict:
-        """
-        Return summary statistics:
-
-            {
-            "count": int,
-            "median": (x_med, y_med) | None,
-            "size": (width, height)
-            }
-
-        width  = xmax - xmin + 1
-        height = ymax - ymin + 1
-        """
-        count = len(self._set)
-        if count == 0:
-            return {
-                "count": 0,
-                "median": None,
-                "size": (0, 0),
-            }
-
-        xs = [x for (x, _) in self._set]
-        ys = [y for (_, y) in self._set]
-
-        xs_sorted = sorted(xs)
-        ys_sorted = sorted(ys)
-        mid = count // 2
-
-        median_x = xs_sorted[mid]
-        median_y = ys_sorted[mid]
-
-        xmin = self.xmin
-        xmax = self.xmax
-        ymin = self.ymin
-        ymax = self.ymax
-
-        width = (xmax - xmin + 1) if xmin is not None and xmax is not None else 0
-        height = (ymax - ymin + 1) if ymin is not None and ymax is not None else 0
-
-        return {
-            "count": count,
-            "median": (median_x, median_y),
-            "size": (width, height),
-        }
-
-
-    def __repr__(self):
-        """
-        Compact one-line summary:
-
-            PixelBag(count=67, median=(46,77), size=(80, 111))
-        """
-        info = self.summary()
-        count = info["count"]
-
-        if count == 0:
-            return "PixelBag(count=0)"
-
-        mx, my = info["median"]
-        w, h = info["size"]
-
-        return (
-            f"PixelBag(count={count}, "
-            f"median=({mx}, {my}), "
-            f"size=({w}, {h}))"
-        )
-
-
-    # --------------------------------------------------
-    # Run-length conversion
-    # --------------------------------------------------
-    def to_run_length(self) -> "PixelBagRunLength":
-        result = PixelBagRunLength()
-
-        _xmin = self.xmin
-        _xmax = self.xmax
-        if _xmin is None or _xmax is None:
-            return result
-
-        for y in self.yrange():
-            x = _xmin
-            while x <= _xmax:
-                if self.contains(x, y):
-                    x_start = x
-                    x_end = x
-                    x += 1
-                    while x <= _xmax and self.contains(x, y):
-                        x_end = x
-                        x += 1
-                    result.add_stripe(PixelBagRunLengthStripe(y, x_start, x_end))
-                else:
-                    x += 1
-        return result
-
-    # --------------------------------------------------
-    # JSON serialization
-    # --------------------------------------------------
-    def to_json(self) -> List[Any]:
-        """
-        Serialize this PixelBag to a JSON-compatible list of run-length
-        stripe objects:
-            [ { "y": ..., "x_start": ..., "x_end": ... }, ... ]
-        """
-        rle = self.to_run_length()
-        return rle.to_json()
-
-    @staticmethod
-    def from_json(data: List[Any]) -> "PixelBag":
-        """
-        Deserialize a PixelBag from a JSON-compatible list produced
-        by PixelBag.to_json().
-
-        Reconstructs all (x, y) pixels from the run-length stripes.
-        """
-        rle = PixelBagRunLength.from_json(data)
-        bag = PixelBag()
-        for stripe in rle.stripes:
-            y = stripe.y
-            for x in range(stripe.x_start, stripe.x_end + 1):
-                bag.add(x, y)
-        return bag
-
-
-
-# ===== pixel_bag_run_length.py =====
-
-# pixel_bag_run_length.py
-from __future__ import annotations
-from typing import Any, Iterable, List
-
-from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
-
-class PixelBagRunLength:
-    """
-    Run-length representation of a PixelBag:
-    a list of horizontal stripes.
-    """
-
-    def __init__(self, stripes: List[PixelBagRunLengthStripe] | None = None) -> None:
-        self.stripes: List[PixelBagRunLengthStripe] = stripes or []
-
-    # --------------------------------------------------
-    # JSON serialization
-    # --------------------------------------------------
-    def to_json(self) -> List[Any]:
-        return [stripe.to_json() for stripe in self.stripes]
-
-    @staticmethod
-    def from_json(data: List[Any]) -> "PixelBagRunLength":
-        stripes = [PixelBagRunLengthStripe.from_json(item) for item in data]
-        return PixelBagRunLength(stripes=stripes)
-
-    # --------------------------------------------------
-    # Utility
-    # --------------------------------------------------
-    def add_stripe(self, stripe: PixelBagRunLengthStripe) -> None:
-        self.stripes.append(stripe)
-
-    def __len__(self) -> int:
-        return len(self.stripes)
-
-    def __iter__(self):
-        return iter(self.stripes)
-
-    # -------- central sorting helper --------
-    @staticmethod
-    def sorted_stripes(
-        stripes: Iterable[PixelBagRunLengthStripe],
-    ) -> List[PixelBagRunLengthStripe]:
-        return sorted(stripes, key=lambda s: (s.y, s.x_start))
-
-    def sorted(self) -> List[PixelBagRunLengthStripe]:
-        return PixelBagRunLength.sorted_stripes(self.stripes)
-
-    # --------------------------------------------------
-    # One-line summary repr
-    # --------------------------------------------------
-    def __repr__(self) -> str:
-        """
-        Compact one-line summary:
-        PixelBagRunLength(count=3, stripes=[Stripe(y=10,3→5), Stripe(y=11,7→7)])
-        """
-        if not self.stripes:
-            return "PixelBagRunLength(count=0, stripes=[])"
-
-        parts = []
-        for s in self.sorted():
-            parts.append(f"Stripe(y={s.y},{s.x_start}→{s.x_end})")
-
-        stripes_str = ", ".join(parts)
-        return f"PixelBagRunLength(count={len(self.stripes)}, stripes=[{stripes_str}])"
-
-
-
-# ===== pixel_bag_run_length_stripe.py =====
-
-# pixel_bag_run_length_stripe.py
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Any, Dict
-
-@dataclass
-class PixelBagRunLengthStripe:
-    """
-    Represents a horizontal run of pixels at a fixed y:
-        x in [x_start, x_end] inclusive.
-    """
-    y: int
-    x_start: int
-    x_end: int
-
-    def to_json(self) -> Dict[str, Any]:
-        """
-        Serialize this stripe to a JSON-compatible dict.
-        """
-        return {
-            "y": int(self.y),
-            "x_start": int(self.x_start),
-            "x_end": int(self.x_end),
-        }
-
-    @staticmethod
-    def from_json(data: Dict[str, Any]) -> "PixelBagRunLengthStripe":
-        """
-        Deserialize a stripe from a JSON-compatible dict.
-        Expects keys: "y", "x_start", "x_end".
-        """
-        return PixelBagRunLengthStripe(
-            y=int(data["y"]),
-            x_start=int(data["x_start"]),
-            x_end=int(data["x_end"]),
-        )
-
-    # --------------------------------------------------
-    # Debug / printing helpers
-    # --------------------------------------------------
-    def repr_str(self, indent: int = 0) -> str:
-        """
-        Return a single-line string representation, with leading tabs
-        based on indent depth.
-        """
-        prefix = "\t" * max(indent, 0)
-        return f"{prefix}(y={self.y}, x_start={self.x_start}, x_end={self.x_end})"
-
-    def __repr__(self) -> str:
-        """
-        Default repr with no indentation.
-        """
-        return self.repr_str(indent=0)
+        beta1 = self.beta1
+        beta2 = self.beta2
+        eps = self.eps
+        lr = self.lr
+        wd = self.weight_decay
+
+        for i, p in enumerate(self.params):
+            g = p.grad
+            if g is None:
+                continue  # no gradient, skip
+
+            # Optional L2 weight decay (classic, not decoupled AdamW)
+            if wd != 0.0:
+                g = g + wd * p.data
+
+            m = self._m[i]
+            v = self._v[i]
+
+            # Increase step count
+            self._step[i] += 1
+            t = self._step[i]
+
+            # m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
+            m[:] = beta1 * m + (1.0 - beta1) * g
+
+            # v_t = beta2 * v_{t-1} + (1 - beta2) * (g_t ** 2)
+            v[:] = beta2 * v + (1.0 - beta2) * (g * g)
+
+            # Bias corrections
+            bias_correction1 = 1.0 - (beta1 ** t)
+            bias_correction2 = 1.0 - (beta2 ** t)
+
+            m_hat = m / bias_correction1
+            v_hat = v / bias_correction2
+
+            # Parameter update
+            p.data[:] = p.data - lr * m_hat / (np.sqrt(v_hat) + eps)
 
 
 

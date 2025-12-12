@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import numpy as np
 
-from scorch.nn_functional import linear_forward
+from scorch.scorch_functional import linear_forward
 from scorch.scorch_module import ScorchModule
 
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from filesystem.file_io import FileIO
+from image.bitmap import Bitmap
 from PIL import Image
 
 if TYPE_CHECKING:
@@ -45,25 +46,37 @@ class FileUtils:
     @classmethod
     def load_image(cls, file_path: Path) -> Image.Image:
         path = Path(file_path).resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Image not found: {path}")
-        img = Image.open(path)
-        img.load()
-        return img
+        if path.is_file():
+            image = Image.open(path)
+            if image is not None:
+                image.load()
+                if image.width > 0 and image.height > 0:
+                    return image
+        base = path.with_suffix("")
+        for extension in [".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG", ".tif", ".tiff"]:
+            attempt_path = base.with_suffix(extension)
+            if attempt_path.is_file():
+                image = Image.open(attempt_path)
+                if image is not None:
+                    image.load()
+                    if image.width > 0 and image.height > 0:
+                        return image
+        raise FileNotFoundError(f"Image not found: {path}")
     
     @classmethod
     def load_bitmap(cls, file_path: Path) -> Bitmap:
         image = cls.load_image(file_path)
         bitmap = Bitmap()
         bitmap.import_pillow(image)
+        return bitmap
 
     @classmethod
-    def load_local_image(cls, subdirectory: Optional[str], name: str, extension="png") -> Image.Image:
+    def load_local_image(cls, subdirectory: Optional[str], name: str, extension=None) -> Image.Image:
         path = FileIO.local_file(subdirectory, name, extension)
         return cls.load_image(path)
     
     @classmethod
-    def load_local_bitmap(cls, subdirectory: Optional[str], name: str, extension="png") -> Bitmap:
+    def load_local_bitmap(cls, subdirectory: Optional[str], name: str, extension=None) -> Bitmap:
         path = FileIO.local_file(subdirectory, name, extension)
         return cls.load_bitmap(path)
 

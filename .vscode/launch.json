@@ -10,6 +10,7 @@
             "request": "launch",
             "program": "main.py",
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "justMyCode": true,
             "suppressMultipleSessionWarning": true
         }

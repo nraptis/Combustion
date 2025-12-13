@@ -12,12 +12,29 @@ from runner_scorch_new import runner_scorch_new
 from runner_scorch_deep_eval import runner_scorch_deep_eval
 from runner_torch_dirty_train import runner_torch_dirty_train
 import pandas as pd
+from image_tools.mask_loader import load_mask_white_xy_255
+from image_tools.mask_loader import load_mask_white_xy_weights
+from filesystem.file_utils import FileUtils
+from image.bitmap import Bitmap
+from image.convolution_edge_behavior import ConvolutionEdgeBehavior
 
 import sys
 
 def main() -> None:
 
     print(sys.executable)
+
+    mask = load_mask_white_xy_weights("images", "mask_white_circle_13_13")
+
+    bitmap = FileUtils.load_local_bitmap("input", "Im006_1")
+
+    out1 = bitmap.copy()
+    out2 = bitmap.convolve(mask, 7, 6, 0, 0)
+
+    FileUtils.save_local_bitmap(out1, "convo_test", "original")
+    FileUtils.save_local_bitmap(out2, "convo_test", "convolutes")
+    
+
 
     #print("=== runner_torch ===")
     #runner_torch()
@@ -39,7 +56,7 @@ def main() -> None:
     # runner_scorch_new()
     # runner_scorch_deep_eval()
 
-    runner_torch_dirty_train()
+    # runner_torch_dirty_train()
 
 
 
@@ -48,10 +65,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # main()
+    main()
 
-    df = pd.read_csv("penguins_cleaned.csv")
-    print(df.head())
+    # df = pd.read_csv("penguins_cleaned.csv")
+    # print(df.head())
 
     
 

@@ -6,7 +6,10 @@ from typing import List
 import numpy as np
 from PIL import Image
 from image.rgba import RGBA
-from filesystem.file_utils import FileUtils
+from image.convolution_edge_behavior import ConvolutionEdgeBehavior
+from typing import Optional
+import torch
+import torch.nn.functional as F
 
 # ----------------------------------------------------------------------
 # Bitmap: rgba[x][y] with OpenCV + Pillow interop
@@ -154,6 +157,7 @@ class Bitmap:
         """
         Create a Bitmap from an explicit file path using FileIO.load_image.
         """
+        from filesystem.file_utils import FileUtils
         image = FileUtils.load_image(file_path)
         self.import_pillow(image)
         return self  # optional, enables chaining
@@ -168,6 +172,7 @@ class Bitmap:
         Create a Bitmap using FileIO.load_local_image
         (which uses FileIO.local for path building).
         """
+        from filesystem.file_utils import FileUtils
         image = FileUtils.load_local_image(
             subdirectory=subdirectory,
             name=name,
@@ -432,3 +437,474 @@ class Bitmap:
                 sx = start_gx + dx
                 result.rgba[dx][dy] = self.rgba[sx][sy]
         return result
+    
+    def convolve(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int) -> Bitmap:
+        """
+        TRIM-only convolution.
+
+        - `mask` is mask[x][y] (your x-major convention).
+        - Output size is (self.width - 2*trim_h, self.height - 2*trim_v).
+        - Only computes outputs whose entire shifted kernel footprint is in-bounds.
+        If trim/offset/mask would sample out of bounds, raises ValueError.
+        - `edge_behavior` is intentionally ignored to keep single responsibility.
+        """
+
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_width = len(mask)
+        if mask_width <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_height = len(mask[0])
+        if mask_height <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_width):
+            if len(mask[x]) != mask_height:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_width % 2) != 1 or (mask_height % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
+            return Bitmap()
+
+        # ----------------------------
+        # Output region (TRIM)
+        # ----------------------------
+        start_x = int(trim_h)
+        end_x = int(self.width - trim_h)   # exclusive
+        start_y = int(trim_v)
+        end_y = int(self.height - trim_v)  # exclusive
+
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
+
+        result = Bitmap(width=out_w, height=out_h)
+
+        # ----------------------------
+        # Kernel radii
+        # ----------------------------
+        rx = mask_width // 2
+        ry = mask_height // 2
+
+        # ----------------------------
+        # TRIM preflight: shifted footprint must fit for the entire output region
+        # ----------------------------
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
+
+        if min_x < 0 or max_x >= self.width or min_y < 0 or max_y >= self.height:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_width}x{mask_height} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={self.width}x{self.height}"
+            )
+
+        # ----------------------------
+        # Convolution
+        # ----------------------------
+        for base_x in range(start_x, end_x):
+            out_x = base_x - start_x
+            for base_y in range(start_y, end_y):
+                out_y = base_y - start_y
+
+                sum_r = 0.0
+                sum_g = 0.0
+                sum_b = 0.0
+                sum_a = 0.0
+
+                for shift_x in range(-rx, rx + 1):
+                    kx = shift_x + rx
+                    src_x = base_x + shift_x + offset_x
+                    mask_col = mask[kx]  # mask[x][y] column
+
+                    for shift_y in range(-ry, ry + 1):
+                        ky = shift_y + ry
+                        src_y = base_y + shift_y + offset_y
+
+                        w = float(mask_col[ky])
+                        if w == 0.0:
+                            continue
+
+                        px = self.rgba[src_x][src_y]
+                        sum_r += float(px.ri) * w
+                        sum_g += float(px.gi) * w
+                        sum_b += float(px.bi) * w
+                        sum_a += float(px.ai) * w
+
+                # Round-to-nearest (weights assumed non-negative)
+                ri = RGBA._clamp_int(int(sum_r + 0.5))
+                gi = RGBA._clamp_int(int(sum_g + 0.5))
+                bi = RGBA._clamp_int(int(sum_b + 0.5))
+                ai = RGBA._clamp_int(int(sum_a + 0.5))
+
+                dst = result.rgba[out_x][out_y]
+                dst.ri = ri
+                dst.gi = gi
+                dst.bi = bi
+                dst.ai = ai
+
+        return result
+    
+    def convolve_fast(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int,
+        edge_behavior,  # kept for signature compatibility; ignored (always TRIM)
+    ) -> Bitmap:
+        """
+        Fast TRIM-only convolution.
+        Matches your convolve() output semantics (mask[x][y], rounding, clamping, output size).
+        """
+
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_w = len(mask)
+        if mask_w <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_h = len(mask[0])
+        if mask_h <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_w):
+            if len(mask[x]) != mask_h:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_w % 2) != 1 or (mask_h % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
+            return Bitmap()
+
+        # ----------------------------
+        # Output region
+        # ----------------------------
+        W = self.width
+        H = self.height
+
+        start_x = int(trim_h)
+        end_x   = int(W - trim_h)   # exclusive
+        start_y = int(trim_v)
+        end_y   = int(H - trim_v)   # exclusive
+
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
+
+        # ----------------------------
+        # Kernel radii
+        # ----------------------------
+        rx = mask_w // 2
+        ry = mask_h // 2
+
+        # ----------------------------
+        # TRIM preflight: shifted footprint must fit
+        # ----------------------------
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
+
+        if min_x < 0 or max_x >= W or min_y < 0 or max_y >= H:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_w}x{mask_h} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={W}x{H}"
+            )
+
+        # ----------------------------
+        # Convert input bitmap to NumPy BGRA (H x W x 4)
+        # ----------------------------
+        src_bgra_u8 = self.export_opencv()  # BGRA uint8, shape (H,W,4)
+
+        # Accumulator in float32
+        acc = np.zeros((out_h, out_w, 4), dtype=np.float32)
+
+        # ----------------------------
+        # Convert mask[x][y] -> mask_np[ky,kx] as HxW (row-major) for iteration
+        # This preserves your mask convention but lets us iterate ky/kx naturally.
+        # ----------------------------
+        mask_np = np.empty((mask_h, mask_w), dtype=np.float32)
+        for x in range(mask_w):
+            col = mask[x]
+            for y in range(mask_h):
+                mask_np[y, x] = float(col[y])
+
+        # ----------------------------
+        # Vectorized convolution via slicing per tap
+        # (ky,kx loop, but each tap is a big NumPy slice multiply-add)
+        # ----------------------------
+        for ky in range(mask_h):
+            shift_y = ky - ry
+            sy0 = start_y + shift_y + offset_y
+            sy1 = end_y   + shift_y + offset_y
+
+            for kx in range(mask_w):
+                w = float(mask_np[ky, kx])
+                if w == 0.0:
+                    continue
+
+                shift_x = kx - rx
+                sx0 = start_x + shift_x + offset_x
+                sx1 = end_x   + shift_x + offset_x
+
+                # src slice is (out_h, out_w, 4)
+                acc += src_bgra_u8[sy0:sy1, sx0:sx1, :].astype(np.float32) * w
+
+        # ----------------------------
+        # Match your rounding + clamp:
+        # int(sum + 0.5) then clamp [0,255]
+        # ----------------------------
+        out_bgra_u8 = np.clip(acc + 0.5, 0.0, 255.0).astype(np.uint8)
+
+        # ----------------------------
+        # Convert back to Bitmap (import_opencv expects BGRA)
+        # ----------------------------
+        result = Bitmap(out_w, out_h)
+        result.import_opencv(out_bgra_u8)
+        return result
+    
+    def convolve_torch(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int,
+        device: str = "cpu",
+    ) -> Bitmap:
+        """
+        TRIM-only convolution using PyTorch as the compute engine.
+
+        Semantics:
+        - mask is mask[x][y] (x-major)
+        - output size is (W - 2*trim_h, H - 2*trim_v)
+        - offset shifts the sampling center like your reference convolve()
+        - channel-independent: same kernel applied to B,G,R,A separately (no mixing)
+        - returns Bitmap via import_opencv (BGRA)
+
+        Note:
+        - Matches your reference within typical tolerance=1 due to float accumulation order.
+        """
+
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_w = len(mask)
+        if mask_w <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_h = len(mask[0])
+        if mask_h <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_w):
+            if len(mask[x]) != mask_h:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_w % 2) != 1 or (mask_h % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
+            return Bitmap()
+
+        W = self.width
+        H = self.height
+
+        start_x = int(trim_h)
+        end_x   = int(W - trim_h)    # exclusive
+        start_y = int(trim_v)
+        end_y   = int(H - trim_v)    # exclusive
+
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
+
+        rx = mask_w // 2
+        ry = mask_h // 2
+
+        # TRIM preflight: shifted footprint must fit
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
+        if min_x < 0 or max_x >= W or min_y < 0 or max_y >= H:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_w}x{mask_h} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={W}x{H}"
+            )
+
+        # ----------------------------
+        # Convert mask[x][y] -> mask_np[ky,kx] (row-major)
+        # ----------------------------
+        mask_np = np.empty((mask_h, mask_w), dtype=np.float32)
+        for x in range(mask_w):
+            col = mask[x]
+            for y in range(mask_h):
+                mask_np[y, x] = float(col[y])
+
+        # ----------------------------
+        # Export bitmap to BGRA (H,W,4) uint8
+        # ----------------------------
+        src_bgra_u8 = self.export_opencv()
+
+        # Torch tensors: input [N,C,H,W] float32
+        # We keep BGRA channel order to match your import/export bridge.
+        x = torch.from_numpy(src_bgra_u8).to(device=device)
+        x = x.permute(2, 0, 1).unsqueeze(0).contiguous().float()  # [1,4,H,W]
+
+        # Weight for depthwise conv: [C,1,kH,kW], groups=C
+        k = torch.from_numpy(mask_np).to(device=device).float()   # [kH,kW]
+        w = k.view(1, 1, mask_h, mask_w).repeat(4, 1, 1, 1)       # [4,1,kH,kW]
+
+        with torch.no_grad():
+            full = F.conv2d(x, w, bias=None, stride=1, padding=0, groups=4)  # [1,4,H-kH+1,W-kW+1]
+
+            # Map your (start_x/start_y, offset) into conv output coordinates:
+            # conv output (oy,ox) corresponds to input center at (oy+ry, ox+rx)
+            # we want center at (base_y+offset_y, base_x+offset_x)
+            # base ranges: base_x=start_x..end_x-1, base_y=start_y..end_y-1
+            ox0 = start_x + offset_x - rx
+            oy0 = start_y + offset_y - ry
+
+            out = full[:, :, oy0:oy0 + out_h, ox0:ox0 + out_w]  # [1,4,out_h,out_w]
+
+            # Match your rounding+clamp: int(sum + 0.5) then clamp [0,255]
+            out_u8 = torch.clamp(out + 0.5, 0.0, 255.0).to(torch.uint8)
+
+        # Back to numpy BGRA (H,W,4)
+        out_bgra_u8 = out_u8.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
+
+        # Import to Bitmap
+        result = Bitmap(out_w, out_h)
+        result.import_opencv(out_bgra_u8)
+        return result
+
+    def compare(self, bitmap: Optional[Bitmap], tolerance: int) -> bool:
+        if not bitmap:
+            return False
+        if self.width != bitmap.width:
+            return False
+        if self.height != bitmap.height:
+            return False
+        for x in range(self.width):
+            for y in range(self.height):
+                if abs(self.rgba[x][y].ri - bitmap.rgba[x][y].ri) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].gi - bitmap.rgba[x][y].gi) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].bi - bitmap.rgba[x][y].bi) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].ai - bitmap.rgba[x][y].ai) > tolerance:
+                    return False
+        return True
+                
+
+    """
+    def convolve(self,
+                 mask: List[List[float]],
+                 trim_h: int,
+                 trim_v: int,
+                 offset_x: int,
+                 offset_y: int,
+                 edge_behavior: ConvolutionEdgeBehavior) -> Bitmap:
+        
+        mask_width = len(mask)
+        mask_height = 0
+        if mask_width > 0:
+            mask_height = len(mask[0])
+
+        if mask_width <= 0 or mask_height <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        
+        if (mask_width % 2) != 1 or (mask_height % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+        
+        mask_width_2 = mask_width // 2
+        start_x = trim_h
+        end_x = self.width - trim_h
+        if start_x - mask_width_2 + offset_x < 0:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        if end_x + mask_width_2 + offset_x > self.width:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        
+        mask_height_2 = mask_height // 2
+        start_y = trim_h
+        end_y = self.height - trim_v
+        if start_y - mask_height_2 + offset_y < 0:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        if end_y + mask_height_2 + offset_y > self.height:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        
+
+        result = Bitmap(width=self.width-(trim_h + trim_h), height=self.height-(trim_v + trim_v))
+
+        # switch edge_behavior:
+
+
+
+        for base_x in range(start_x, end_x):
+            for base_y in range(start_y, end_y):
+                sum_r = float(0.0)
+                sum_g = float(0.0)
+                sum_b = float(0.0)
+                sum_a = float(0.0)
+
+                for shift_x in range(-mask_width_2, mask_width_2 + 1):
+                    x = base_x + shift_x + offset_x
+                    for shift_y in range(-mask_height_2, mask_height_2 + 1):
+                        y = base_y + shift_y + offset_y
+
+                        mask_factor = mask[shift_x + mask_width_2][shift_y + mask_height_2]
+
+                        acc_r = float(self.rgba[x][y].ri) * mask_factor
+                        acc_g = float(self.rgba[x][y].gi) * mask_factor
+                        acc_b = float(self.rgba[x][y].bi) * mask_factor
+                        acc_a = float(self.rgba[x][y].ai) * mask_factor
+
+                        sum_r += acc_r
+                        sum_g += acc_g
+                        sum_b += acc_b
+                        sum_a += acc_a
+                
+                ri = RGBA._clamp_int(int(sum_r + 0.5))
+                gi = RGBA._clamp_int(int(sum_g + 0.5))
+                bi = RGBA._clamp_int(int(sum_b + 0.5))
+                ai = RGBA._clamp_int(int(sum_a + 0.5))
+
+                result.rgba[base_x - trim_h][base_y - trim_v].ri = ri
+                result.rgba[base_x - trim_h][base_y - trim_v].gi = gi
+                result.rgba[base_x - trim_h][base_y - trim_v].bi = bi
+                result.rgba[base_x - trim_h][base_y - trim_v].ai = ai
+
+        return result
+    """

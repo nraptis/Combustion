@@ -11,7 +11,6 @@ from labels.data_label import DataLabel
 from labels.image_annotation_document import ImageAnnotationDocument
 
 from image_tools.mask_loader import load_mask_white_xy_weights
-
 from image.bitmap import Bitmap
 
 class MedicoolGordonConvolver:
@@ -20,8 +19,9 @@ class MedicoolGordonConvolver:
     TRIM_V = 32  # keep this different for verify test
 
     KERNEL_SUBDIR = "images"
-    KERNEL_FILE = "good_egg_kernel_red_5_9.png"
-
+    #KERNEL_FILE = "good_egg_kernel_red_5_9.png"
+    KERNEL_FILE = "stripe_kernel_red_7_1.png"
+    
     OUTPUT_SUFFIX = "_gor"  # gordon chase, street farmer commando (extaordinary demon slayer)
 
     @classmethod
@@ -63,7 +63,7 @@ class MedicoolGordonConvolver:
                     extension=None,
                 )
 
-                convolved = bmp.convolve_fast(
+                convolved = bmp.convolve(
                     mask=mask,
                     trim_h=cls.TRIM_H,
                     trim_v=cls.TRIM_V,

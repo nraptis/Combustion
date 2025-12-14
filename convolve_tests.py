@@ -280,7 +280,7 @@ def main():
         )
 
         native_ok, native_out, native_exc = run_one("native", lambda: bitmap.convolve(mask, trim_h, trim_v, offset_x, offset_y))
-        opencv_ok, opencv_out, opencv_exc = run_one("opencv", lambda: bitmap.convolve_fast(mask, trim_h, trim_v, offset_x, offset_y, None))
+        opencv_ok, opencv_out, opencv_exc = run_one("opencv", lambda: bitmap.convolve(mask, trim_h, trim_v, offset_x, offset_y))
         torch_ok,  torch_out,  torch_exc  = run_one("torch",  lambda: bitmap.convolve_torch(mask, trim_h, trim_v, offset_x, offset_y, device="cpu"))
 
         ok_tuple = (native_ok, opencv_ok, torch_ok)

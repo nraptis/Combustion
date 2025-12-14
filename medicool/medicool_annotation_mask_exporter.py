@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import List, Tuple
-import json
-from labels.pixel_bag import PixelBag
+from typing import List
 from labels.data_label import DataLabel
-from labels.data_label_collection import DataLabelCollection
 from labels.image_annotation_document import ImageAnnotationDocument
-from filesystem.file_io import FileIO
 from filesystem.file_utils import FileUtils
 from image.bitmap import Bitmap
 from image.rgba import RGBA
@@ -32,8 +28,9 @@ class MedicoolAnnotationMaskExporter:
 
         Output name format:
           <source_stem><destination_mask_suffix>_<NNN>.png
+
         Returns:
-          (exported_mask_names, success_count, failure_count)
+          list of exported mask filenames (with .png extension)
         """
         exported_mask_names: List[str] = []
         success = 0
@@ -42,39 +39,51 @@ class MedicoolAnnotationMaskExporter:
         def num_str(i: int) -> str:
             return f"{i:0{minimum_digit_count}d}"
 
+        WHITE = RGBA(255, 255, 255, 255)
+        BLACK = RGBA(0, 0, 0, 255)
+
         for source_label_file_name in source_label_file_names:
             try:
-                document = ImageAnnotationDocument.from_local_file(subdirectory=source_label_subdir,
+                document = ImageAnnotationDocument.from_local_file(
+                    subdirectory=source_label_subdir,
                     name=source_label_file_name,
-                    extension=None)
+                    extension=None,
+                )
+
+                W = int(document.width)
+                H = int(document.height)
+                if W <= 0 or H <= 0:
+                    raise ValueError(f"Document has invalid dimensions ({W},{H})")
 
                 labels: List[DataLabel] = document.data.labels
-
-                # stem without extension (proto_cells_train_000_annotations)
-                source_stem = Path(source_label_file_name).stem
+                source_stem = Path(source_label_file_name).stem  # no extension
 
                 for export_index, label in enumerate(labels):
                     try:
                         # White background
-                        bitmap = Bitmap(document.width, document.height)
-                        bitmap.flood(RGBA(0, 0, 0, 255))
+                        bitmap = Bitmap(W, H)
+                        bitmap.flood(WHITE)
 
-                        # Stamp label pixels as black
-                        bag = label.pixel_bag
-                        for (x, y) in bag:
-                            if 0 <= x < bitmap.width and 0 <= y < bitmap.height:
-                                px = bitmap.rgba[x][y]
-                                px.ri = 255
-                                px.gi = 255
-                                px.bi = 255
-                                px.ai = 255
+                        bag = getattr(label, "pixel_bag", None)
+                        if bag is None or len(bag) == 0:
+                            # Export an all-white mask for empty labels (still useful for debugging)
+                            pass
+                        else:
+                            # Stamp label pixels as black
+                            for (x0, y0) in bag:
+                                x = int(x0)
+                                y = int(y0)
+                                if 0 <= x < W and 0 <= y < H:
+                                    px = bitmap.rgba[x][y]
+                                    px.ri = BLACK.ri
+                                    px.gi = BLACK.gi
+                                    px.bi = BLACK.bi
+                                    px.ai = BLACK.ai
 
-                        # Build export name (NO extension here)
                         export_name_no_ext = (
                             f"{source_stem}{destination_mask_suffix}_{num_str(export_index)}"
                         )
 
-                        # Save as png
                         FileUtils.save_local_bitmap(
                             bitmap,
                             subdirectory=destination_mask_subdir,
@@ -87,10 +96,12 @@ class MedicoolAnnotationMaskExporter:
 
                     except Exception as e_label:
                         failure += 1
-                        print(f"❌ Mask export failed (label {export_index}) for {source_label_file_name}: {e_label}")
+                        print(
+                            f"❌ Mask export failed (label {export_index}) "
+                            f"for {source_label_file_name}: {e_label}"
+                        )
 
             except Exception as e_file:
-                # If the whole file fails to load/parse, count it as one failure
                 failure += 1
                 print(f"❌ Label file failed: {source_label_file_name}: {e_file}")
 

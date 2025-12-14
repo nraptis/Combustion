@@ -1,0 +1,692 @@
+{
+  "name": "proto_cells_train_005",
+  "width": 85,
+  "height": 85,
+  "data_label_names": [
+    "Blue",
+    "Green",
+    "Red"
+  ],
+  "labels": [
+    {
+      "name": "Green",
+      "pixels": [
+        {
+          "y": 22,
+          "x_start": 36,
+          "x_end": 42
+        },
+        {
+          "y": 23,
+          "x_start": 34,
+          "x_end": 43
+        },
+        {
+          "y": 24,
+          "x_start": 33,
+          "x_end": 44
+        },
+        {
+          "y": 25,
+          "x_start": 33,
+          "x_end": 45
+        },
+        {
+          "y": 26,
+          "x_start": 32,
+          "x_end": 45
+        },
+        {
+          "y": 27,
+          "x_start": 32,
+          "x_end": 45
+        },
+        {
+          "y": 28,
+          "x_start": 32,
+          "x_end": 45
+        },
+        {
+          "y": 29,
+          "x_start": 32,
+          "x_end": 45
+        },
+        {
+          "y": 30,
+          "x_start": 32,
+          "x_end": 45
+        },
+        {
+          "y": 31,
+          "x_start": 33,
+          "x_end": 45
+        },
+        {
+          "y": 32,
+          "x_start": 33,
+          "x_end": 44
+        },
+        {
+          "y": 33,
+          "x_start": 34,
+          "x_end": 44
+        },
+        {
+          "y": 34,
+          "x_start": 35,
+          "x_end": 43
+        },
+        {
+          "y": 35,
+          "x_start": 37,
+          "x_end": 41
+        }
+      ]
+    },
+    {
+      "name": "Blue",
+      "pixels": [
+        {
+          "y": 14,
+          "x_start": 2,
+          "x_end": 8
+        },
+        {
+          "y": 15,
+          "x_start": 0,
+          "x_end": 10
+        },
+        {
+          "y": 16,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 17,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 18,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 19,
+          "x_start": 0,
+          "x_end": 14
+        },
+        {
+          "y": 20,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 21,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 22,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 23,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 24,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 25,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 26,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 27,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 28,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 29,
+          "x_start": 0,
+          "x_end": 15
+        },
+        {
+          "y": 30,
+          "x_start": 0,
+          "x_end": 14
+        },
+        {
+          "y": 31,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 32,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 33,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 34,
+          "x_start": 0,
+          "x_end": 10
+        },
+        {
+          "y": 35,
+          "x_start": 2,
+          "x_end": 8
+        }
+      ]
+    },
+    {
+      "name": "Red",
+      "pixels": [
+        {
+          "y": 46,
+          "x_start": 43,
+          "x_end": 51
+        },
+        {
+          "y": 47,
+          "x_start": 41,
+          "x_end": 53
+        },
+        {
+          "y": 48,
+          "x_start": 40,
+          "x_end": 54
+        },
+        {
+          "y": 49,
+          "x_start": 39,
+          "x_end": 55
+        },
+        {
+          "y": 50,
+          "x_start": 38,
+          "x_end": 56
+        },
+        {
+          "y": 51,
+          "x_start": 38,
+          "x_end": 57
+        },
+        {
+          "y": 52,
+          "x_start": 37,
+          "x_end": 57
+        },
+        {
+          "y": 53,
+          "x_start": 37,
+          "x_end": 57
+        },
+        {
+          "y": 54,
+          "x_start": 37,
+          "x_end": 58
+        },
+        {
+          "y": 55,
+          "x_start": 37,
+          "x_end": 58
+        },
+        {
+          "y": 56,
+          "x_start": 37,
+          "x_end": 58
+        },
+        {
+          "y": 57,
+          "x_start": 37,
+          "x_end": 58
+        },
+        {
+          "y": 58,
+          "x_start": 37,
+          "x_end": 58
+        },
+        {
+          "y": 59,
+          "x_start": 37,
+          "x_end": 57
+        },
+        {
+          "y": 60,
+          "x_start": 37,
+          "x_end": 57
+        },
+        {
+          "y": 61,
+          "x_start": 38,
+          "x_end": 57
+        },
+        {
+          "y": 62,
+          "x_start": 38,
+          "x_end": 56
+        },
+        {
+          "y": 63,
+          "x_start": 39,
+          "x_end": 56
+        },
+        {
+          "y": 64,
+          "x_start": 40,
+          "x_end": 55
+        },
+        {
+          "y": 65,
+          "x_start": 41,
+          "x_end": 54
+        },
+        {
+          "y": 66,
+          "x_start": 42,
+          "x_end": 52
+        },
+        {
+          "y": 67,
+          "x_start": 45,
+          "x_end": 49
+        }
+      ]
+    },
+    {
+      "name": "Green",
+      "pixels": [
+        {
+          "y": 39,
+          "x_start": 83,
+          "x_end": 84
+        },
+        {
+          "y": 40,
+          "x_start": 82,
+          "x_end": 84
+        },
+        {
+          "y": 41,
+          "x_start": 82,
+          "x_end": 84
+        },
+        {
+          "y": 42,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 43,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 44,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 45,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 46,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 47,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 48,
+          "x_start": 82,
+          "x_end": 84
+        },
+        {
+          "y": 49,
+          "x_start": 83,
+          "x_end": 84
+        },
+        {
+          "y": 50,
+          "x_start": 84,
+          "x_end": 84
+        }
+      ]
+    },
+    {
+      "name": "Blue",
+      "pixels": [
+        {
+          "y": 79,
+          "x_start": 36,
+          "x_end": 41
+        },
+        {
+          "y": 80,
+          "x_start": 35,
+          "x_end": 42
+        },
+        {
+          "y": 81,
+          "x_start": 34,
+          "x_end": 43
+        },
+        {
+          "y": 82,
+          "x_start": 33,
+          "x_end": 44
+        },
+        {
+          "y": 83,
+          "x_start": 33,
+          "x_end": 44
+        },
+        {
+          "y": 84,
+          "x_start": 33,
+          "x_end": 44
+        }
+      ]
+    },
+    {
+      "name": "Green",
+      "pixels": [
+        {
+          "y": 39,
+          "x_start": 7,
+          "x_end": 15
+        },
+        {
+          "y": 40,
+          "x_start": 5,
+          "x_end": 17
+        },
+        {
+          "y": 41,
+          "x_start": 4,
+          "x_end": 18
+        },
+        {
+          "y": 42,
+          "x_start": 3,
+          "x_end": 19
+        },
+        {
+          "y": 43,
+          "x_start": 2,
+          "x_end": 20
+        },
+        {
+          "y": 44,
+          "x_start": 1,
+          "x_end": 20
+        },
+        {
+          "y": 45,
+          "x_start": 1,
+          "x_end": 21
+        },
+        {
+          "y": 46,
+          "x_start": 1,
+          "x_end": 21
+        },
+        {
+          "y": 47,
+          "x_start": 0,
+          "x_end": 21
+        },
+        {
+          "y": 48,
+          "x_start": 0,
+          "x_end": 21
+        },
+        {
+          "y": 49,
+          "x_start": 0,
+          "x_end": 21
+        },
+        {
+          "y": 50,
+          "x_start": 0,
+          "x_end": 21
+        },
+        {
+          "y": 51,
+          "x_start": 0,
+          "x_end": 21
+        },
+        {
+          "y": 52,
+          "x_start": 1,
+          "x_end": 21
+        },
+        {
+          "y": 53,
+          "x_start": 1,
+          "x_end": 21
+        },
+        {
+          "y": 54,
+          "x_start": 1,
+          "x_end": 20
+        },
+        {
+          "y": 55,
+          "x_start": 2,
+          "x_end": 20
+        },
+        {
+          "y": 56,
+          "x_start": 2,
+          "x_end": 19
+        },
+        {
+          "y": 57,
+          "x_start": 3,
+          "x_end": 18
+        },
+        {
+          "y": 58,
+          "x_start": 4,
+          "x_end": 17
+        },
+        {
+          "y": 59,
+          "x_start": 6,
+          "x_end": 16
+        },
+        {
+          "y": 60,
+          "x_start": 9,
+          "x_end": 13
+        }
+      ]
+    },
+    {
+      "name": "Blue",
+      "pixels": [
+        {
+          "y": 20,
+          "x_start": 62,
+          "x_end": 67
+        },
+        {
+          "y": 21,
+          "x_start": 60,
+          "x_end": 69
+        },
+        {
+          "y": 22,
+          "x_start": 59,
+          "x_end": 70
+        },
+        {
+          "y": 23,
+          "x_start": 58,
+          "x_end": 71
+        },
+        {
+          "y": 24,
+          "x_start": 58,
+          "x_end": 71
+        },
+        {
+          "y": 25,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 26,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 27,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 28,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 29,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 30,
+          "x_start": 57,
+          "x_end": 72
+        },
+        {
+          "y": 31,
+          "x_start": 58,
+          "x_end": 71
+        },
+        {
+          "y": 32,
+          "x_start": 58,
+          "x_end": 71
+        },
+        {
+          "y": 33,
+          "x_start": 59,
+          "x_end": 70
+        },
+        {
+          "y": 34,
+          "x_start": 60,
+          "x_end": 69
+        },
+        {
+          "y": 35,
+          "x_start": 62,
+          "x_end": 67
+        }
+      ]
+    },
+    {
+      "name": "Red",
+      "pixels": [
+        {
+          "y": 59,
+          "x_start": 83,
+          "x_end": 84
+        },
+        {
+          "y": 60,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 61,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 62,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 63,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 64,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 65,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 66,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 67,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 68,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 69,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 70,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 71,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 72,
+          "x_start": 81,
+          "x_end": 84
+        }
+      ]
+    }
+  ]
+}

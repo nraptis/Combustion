@@ -1,0 +1,427 @@
+{
+  "name": "proto_cells_train_008",
+  "width": 85,
+  "height": 85,
+  "data_label_names": [
+    "Blue",
+    "Green",
+    "Red"
+  ],
+  "labels": [
+    {
+      "name": "Green",
+      "pixels": [
+        {
+          "y": 45,
+          "x_start": 2,
+          "x_end": 8
+        },
+        {
+          "y": 46,
+          "x_start": 1,
+          "x_end": 10
+        },
+        {
+          "y": 47,
+          "x_start": 0,
+          "x_end": 11
+        },
+        {
+          "y": 48,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 49,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 50,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 51,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 52,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 53,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 54,
+          "x_start": 0,
+          "x_end": 13
+        },
+        {
+          "y": 55,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 56,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 57,
+          "x_start": 0,
+          "x_end": 12
+        },
+        {
+          "y": 58,
+          "x_start": 0,
+          "x_end": 11
+        },
+        {
+          "y": 59,
+          "x_start": 1,
+          "x_end": 10
+        },
+        {
+          "y": 60,
+          "x_start": 2,
+          "x_end": 8
+        }
+      ]
+    },
+    {
+      "name": "Red",
+      "pixels": [
+        {
+          "y": 70,
+          "x_start": 53,
+          "x_end": 59
+        },
+        {
+          "y": 71,
+          "x_start": 52,
+          "x_end": 60
+        },
+        {
+          "y": 72,
+          "x_start": 51,
+          "x_end": 61
+        },
+        {
+          "y": 73,
+          "x_start": 51,
+          "x_end": 62
+        },
+        {
+          "y": 74,
+          "x_start": 50,
+          "x_end": 62
+        },
+        {
+          "y": 75,
+          "x_start": 50,
+          "x_end": 62
+        },
+        {
+          "y": 76,
+          "x_start": 50,
+          "x_end": 62
+        },
+        {
+          "y": 77,
+          "x_start": 50,
+          "x_end": 62
+        },
+        {
+          "y": 78,
+          "x_start": 51,
+          "x_end": 62
+        },
+        {
+          "y": 79,
+          "x_start": 51,
+          "x_end": 61
+        },
+        {
+          "y": 80,
+          "x_start": 52,
+          "x_end": 60
+        },
+        {
+          "y": 81,
+          "x_start": 53,
+          "x_end": 59
+        }
+      ]
+    },
+    {
+      "name": "Green",
+      "pixels": [
+        {
+          "y": 8,
+          "x_start": 84,
+          "x_end": 84
+        },
+        {
+          "y": 9,
+          "x_start": 83,
+          "x_end": 84
+        },
+        {
+          "y": 10,
+          "x_start": 82,
+          "x_end": 84
+        },
+        {
+          "y": 11,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 12,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 13,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 14,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 15,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 16,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 17,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 18,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 19,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 20,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 21,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 22,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 23,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 24,
+          "x_start": 78,
+          "x_end": 84
+        },
+        {
+          "y": 25,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 26,
+          "x_start": 79,
+          "x_end": 84
+        },
+        {
+          "y": 27,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 28,
+          "x_start": 80,
+          "x_end": 84
+        },
+        {
+          "y": 29,
+          "x_start": 81,
+          "x_end": 84
+        },
+        {
+          "y": 30,
+          "x_start": 82,
+          "x_end": 84
+        },
+        {
+          "y": 31,
+          "x_start": 83,
+          "x_end": 84
+        }
+      ]
+    },
+    {
+      "name": "Blue",
+      "pixels": [
+        {
+          "y": 56,
+          "x_start": 32,
+          "x_end": 38
+        },
+        {
+          "y": 57,
+          "x_start": 31,
+          "x_end": 39
+        },
+        {
+          "y": 58,
+          "x_start": 30,
+          "x_end": 40
+        },
+        {
+          "y": 59,
+          "x_start": 29,
+          "x_end": 40
+        },
+        {
+          "y": 60,
+          "x_start": 29,
+          "x_end": 41
+        },
+        {
+          "y": 61,
+          "x_start": 29,
+          "x_end": 41
+        },
+        {
+          "y": 62,
+          "x_start": 29,
+          "x_end": 41
+        },
+        {
+          "y": 63,
+          "x_start": 29,
+          "x_end": 41
+        },
+        {
+          "y": 64,
+          "x_start": 29,
+          "x_end": 40
+        },
+        {
+          "y": 65,
+          "x_start": 30,
+          "x_end": 40
+        },
+        {
+          "y": 66,
+          "x_start": 31,
+          "x_end": 39
+        },
+        {
+          "y": 67,
+          "x_start": 32,
+          "x_end": 38
+        }
+      ]
+    },
+    {
+      "name": "Blue",
+      "pixels": [
+        {
+          "y": 5,
+          "x_start": 9,
+          "x_end": 12
+        },
+        {
+          "y": 6,
+          "x_start": 6,
+          "x_end": 14
+        },
+        {
+          "y": 7,
+          "x_start": 5,
+          "x_end": 15
+        },
+        {
+          "y": 8,
+          "x_start": 5,
+          "x_end": 16
+        },
+        {
+          "y": 9,
+          "x_start": 4,
+          "x_end": 16
+        },
+        {
+          "y": 10,
+          "x_start": 4,
+          "x_end": 17
+        },
+        {
+          "y": 11,
+          "x_start": 4,
+          "x_end": 17
+        },
+        {
+          "y": 12,
+          "x_start": 4,
+          "x_end": 17
+        },
+        {
+          "y": 13,
+          "x_start": 4,
+          "x_end": 17
+        },
+        {
+          "y": 14,
+          "x_start": 4,
+          "x_end": 16
+        },
+        {
+          "y": 15,
+          "x_start": 4,
+          "x_end": 16
+        },
+        {
+          "y": 16,
+          "x_start": 5,
+          "x_end": 16
+        },
+        {
+          "y": 17,
+          "x_start": 6,
+          "x_end": 15
+        },
+        {
+          "y": 18,
+          "x_start": 7,
+          "x_end": 13
+        }
+      ]
+    }
+  ]
+}

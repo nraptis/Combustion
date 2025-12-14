@@ -443,8 +443,8 @@ class Bitmap:
         mask: List[List[float]],
         trim_h: int,
         trim_v: int,
-        offset_x: int,
-        offset_y: int) -> Bitmap:
+        offset_x: int = 0,
+        offset_y: int = 0) -> Bitmap:
         """
         TRIM-only convolution.
 
@@ -566,9 +566,8 @@ class Bitmap:
         mask: List[List[float]],
         trim_h: int,
         trim_v: int,
-        offset_x: int,
-        offset_y: int,
-        edge_behavior,  # kept for signature compatibility; ignored (always TRIM)
+        offset_x: int = 0,
+        offset_y: int = 0,
     ) -> Bitmap:
         """
         Fast TRIM-only convolution.
@@ -693,8 +692,8 @@ class Bitmap:
         mask: List[List[float]],
         trim_h: int,
         trim_v: int,
-        offset_x: int,
-        offset_y: int,
+        offset_x: int = 0,
+        offset_y: int = 0,
         device: str = "cpu",
     ) -> Bitmap:
         """
@@ -827,84 +826,3 @@ class Bitmap:
                 if abs(self.rgba[x][y].ai - bitmap.rgba[x][y].ai) > tolerance:
                     return False
         return True
-                
-
-    """
-    def convolve(self,
-                 mask: List[List[float]],
-                 trim_h: int,
-                 trim_v: int,
-                 offset_x: int,
-                 offset_y: int,
-                 edge_behavior: ConvolutionEdgeBehavior) -> Bitmap:
-        
-        mask_width = len(mask)
-        mask_height = 0
-        if mask_width > 0:
-            mask_height = len(mask[0])
-
-        if mask_width <= 0 or mask_height <= 0:
-            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
-        
-        if (mask_width % 2) != 1 or (mask_height % 2) != 1:
-            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
-        
-        mask_width_2 = mask_width // 2
-        start_x = trim_h
-        end_x = self.width - trim_h
-        if start_x - mask_width_2 + offset_x < 0:
-            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
-        if end_x + mask_width_2 + offset_x > self.width:
-            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
-        
-        mask_height_2 = mask_height // 2
-        start_y = trim_h
-        end_y = self.height - trim_v
-        if start_y - mask_height_2 + offset_y < 0:
-            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
-        if end_y + mask_height_2 + offset_y > self.height:
-            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
-        
-
-        result = Bitmap(width=self.width-(trim_h + trim_h), height=self.height-(trim_v + trim_v))
-
-        # switch edge_behavior:
-
-
-
-        for base_x in range(start_x, end_x):
-            for base_y in range(start_y, end_y):
-                sum_r = float(0.0)
-                sum_g = float(0.0)
-                sum_b = float(0.0)
-                sum_a = float(0.0)
-
-                for shift_x in range(-mask_width_2, mask_width_2 + 1):
-                    x = base_x + shift_x + offset_x
-                    for shift_y in range(-mask_height_2, mask_height_2 + 1):
-                        y = base_y + shift_y + offset_y
-
-                        mask_factor = mask[shift_x + mask_width_2][shift_y + mask_height_2]
-
-                        acc_r = float(self.rgba[x][y].ri) * mask_factor
-                        acc_g = float(self.rgba[x][y].gi) * mask_factor
-                        acc_b = float(self.rgba[x][y].bi) * mask_factor
-                        acc_a = float(self.rgba[x][y].ai) * mask_factor
-
-                        sum_r += acc_r
-                        sum_g += acc_g
-                        sum_b += acc_b
-                        sum_a += acc_a
-                
-                ri = RGBA._clamp_int(int(sum_r + 0.5))
-                gi = RGBA._clamp_int(int(sum_g + 0.5))
-                bi = RGBA._clamp_int(int(sum_b + 0.5))
-                ai = RGBA._clamp_int(int(sum_a + 0.5))
-
-                result.rgba[base_x - trim_h][base_y - trim_v].ri = ri
-                result.rgba[base_x - trim_h][base_y - trim_v].gi = gi
-                result.rgba[base_x - trim_h][base_y - trim_v].bi = bi
-                result.rgba[base_x - trim_h][base_y - trim_v].ai = ai
-
-        return result
-    """

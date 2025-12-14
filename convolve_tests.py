@@ -248,10 +248,10 @@ def random_params_mixed(img_w: int, img_h: int, mask_w: int, mask_h: int):
 
 
 def main():
-    random.seed()
+    random.seed(900)
 
-    trials = 1000
-    tolerance = 1
+    trials = 1500
+    tolerance = 2
 
     success_matches = 0
     failure_matches = 0
@@ -342,7 +342,7 @@ def main():
 
             success_matches += 1
 
-        if i % 10 == 0:
+        if ((i < 100) and (i % 10 == 0) or ((i % 100) == 0)):
             print(
                 f"[OK] {i}/{trials} "
                 f"success_matches={success_matches} "

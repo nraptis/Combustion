@@ -1,6 +1,12 @@
 # main.py
 
 import numpy as np
+
+from medicool.medicool_data_bank import MedicoolDataBank
+from medicool.medicool_annotation_mask_exporter import MedicoolAnnotationMaskExporter
+from medicool.medicool_gordon_convolver import MedicoolGordonConvolver
+ 
+
 from runner_torch import runner_torch
 from runner_scorch import runner_scorch
 from runner_scorch_train import runner_scorch_train
@@ -22,6 +28,38 @@ import sys
 
 def main() -> None:
 
+
+    training_image_subdir,\
+    training_label_subdir,\
+    training_image_file_names,\
+    training_label_file_names = MedicoolDataBank.get_training_file_info()
+
+    gordon_img_out = "gordon_image"
+    gordon_lbl_out = "gordon_anno"
+    gordon_msks_out = "gordon_masks"
+
+
+    image_files,\
+    label_files=\
+    MedicoolGordonConvolver.execute(training_image_subdir,
+                                    training_image_file_names,
+                                    training_label_subdir,
+                                    training_label_file_names,
+                                    gordon_img_out,
+                                    gordon_lbl_out)
+
+    print("out_image_files", image_files)
+    print("out_label_files", label_files)
+
+    MedicoolAnnotationMaskExporter.execute(
+    source_label_subdir="gordon_anno",
+    source_label_file_names=label_files,
+    destination_mask_subdir=gordon_msks_out,
+    destination_mask_suffix="_mask",
+    minimum_digit_count=3,
+)
+
+    """
     print(sys.executable)
 
     mask = load_mask_white_xy_weights("images", "mask_white_circle_13_13")
@@ -33,7 +71,7 @@ def main() -> None:
 
     FileUtils.save_local_bitmap(out1, "convo_test", "original")
     FileUtils.save_local_bitmap(out2, "convo_test", "convolutes")
-    
+    """
 
 
     #print("=== runner_torch ===")

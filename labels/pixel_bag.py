@@ -15,6 +15,14 @@ class PixelBag:
     def __init__(self) -> None:
         self._set = set()   # stores (x, y)
 
+    @property
+    def pixels(self) -> List[tuple[int, int]]:
+        """
+        Return all pixels in this bag as a list of (x, y) tuples.
+        Always returns a list (never None).
+        """
+        return list(self._set)
+
     # --------------------------------------------------
     # Basic operations
     # --------------------------------------------------

@@ -43,7 +43,10 @@ def combine_python_files_recursive(root_folders, output_path):
 
 combine_python_files_recursive(
     root_folders=[
-        "scorch",
+        "image",
+        "labels",
+        "filesystem",
+        
     ],
     output_path="fullcode.py.txt"
 )

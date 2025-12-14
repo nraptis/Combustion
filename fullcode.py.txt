@@ -1,3186 +1,2112 @@
-# ========== ROOT: /Users/naraptis/Desktop/Combustion/scorch ==========
+# ========== ROOT: /Users/naraptis/Desktop/Combustion/image ==========
 
-# ===== grad_check.py =====
+# ===== bitmap.py =====
 
-# scorch/grad_check.py
+# bitmap.py
+
 from __future__ import annotations
-
-import numpy as np
-
-from scorch.scorch_sequential import ScorchSequential
-from scorch.scorch_linear_2 import ScorchLinear2
-from scorch.scorch_relu_2 import ScorchReLU2
-
-
-def softmax_and_cross_entropy_with_grad(logits: np.ndarray, target_index: int):
-    """
-    Same as in your runner, but local here for convenience.
-    """
-    shifted = logits - np.max(logits)
-    exp = np.exp(shifted)
-    probs = exp / np.sum(exp)
-
-    loss = -np.log(probs[target_index] + 1e-12)
-
-    grad = probs.copy()
-    grad[target_index] -= 1.0
-
-    return float(loss), grad
-
-
-def compute_loss(model: ScorchSequential, x: np.ndarray, target_index: int) -> float:
-    """
-    Forward through the model and return scalar loss for a single (x, y).
-    No gradient computation here, pure forward.
-    """
-    logits = model.forward(x)  # (C,)
-    loss, _ = softmax_and_cross_entropy_with_grad(logits, target_index)
-    return loss
-
-
-def compute_loss_and_backprop(model: ScorchSequential, x: np.ndarray, target_index: int):
-    """
-    Forward + backward for a single sample.
-    Returns:
-        loss (float)
-    and fills model's gradients via backward().
-    """
-    model.zero_grad()
-
-    logits = model.forward(x)
-    loss, grad_logits = softmax_and_cross_entropy_with_grad(logits, target_index)
-    _ = model.backward(grad_logits)
-
-    return loss
-
-
-def grad_check_weight(
-    model: ScorchSequential,
-    x: np.ndarray,
-    target_index: int,
-    layer_idx: int,
-    i: int,
-    j: int,
-    eps: float = 1e-4,
-):
-    """
-    Compare analytic grad_W[i,j] vs numeric finite-difference gradient on a given layer.
-
-    layer_idx:
-        index in model.layers where the ScorchLinear2 lives.
-
-    i, j:
-        indices into that layer's W matrix.
-    """
-    layer = model.layers[layer_idx]
-    if not isinstance(layer, ScorchLinear2):
-        raise TypeError(f"Layer at index {layer_idx} is not ScorchLinear2: {type(layer)}")
-
-    W = layer.W
-
-    # --- 1) Analytic gradient via backprop ---
-    _ = compute_loss_and_backprop(model, x, target_index)
-    analytic = layer.grad_W[i, j]
-
-    # --- 2) Numeric gradient via finite differences ---
-    original = W[i, j]
-
-    # W[i, j] + eps
-    W[i, j] = original + eps
-    loss_plus = compute_loss(model, x, target_index)
-
-    # W[i, j] - eps
-    W[i, j] = original - eps
-    loss_minus = compute_loss(model, x, target_index)
-
-    # Restore original weight
-    W[i, j] = original
-
-    numeric = (loss_plus - loss_minus) / (2.0 * eps)
-
-    # --- 3) Print comparison ---
-    print(f"[grad_check] layer={layer_idx}, W[{i},{j}]")
-    print(f"  analytic: {analytic}")
-    print(f"  numeric : {numeric}")
-    print(f"  diff    : {abs(analytic - numeric)}")
-
-    return analytic, numeric
-
-
-
-# ===== nn_functional.py =====
-
-# scorch/nn_functional.py
-from __future__ import annotations
-import numpy as np
-
-def linear_forward(x: np.ndarray, W: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """
-
-    W is the matrix of learned weights.
-    linear_forward applies those weights to
-    the input features to compute the output
-    neuron activations. These activations
-    propagate forward to the next layer,
-    or become the final “logits” used
-    by the network to make predictions.
-
-    Pure function: y = W @ x + b
-
-    x: (D,)
-    W: (C, D)
-    b: (C,)
-    returns: (C,)
-    """
-
-    #return W @ x + b
-
-    
-    C = W.shape[0]   # number of output neurons
-    D = W.shape[1]   # number of input features
-
-    # Safety check
-    if x.shape[0] != D:
-        raise ValueError(f"linear_forward: Expected x of shape ({D},), got {x.shape}")
-
-    z = [0.0 for _ in range(C)]
-
-    for i in range(C):         # for every output neuron
-        acc = 0.0
-        for j in range(D):     # multiply across the row of W
-            acc += W[i, j] * x[j]
-        acc += b[i]            # add bias
-        z[i] = acc
-
-    return np.array(z, dtype=np.float32)
-
-
-def softmax_cross_entropy(logits: np.ndarray, target_index: int) -> float:
-    """
-    Pure function: softmax + cross-entropy loss for a single example.
-
-    logits is the output from linear forward … a 1-D list of floats.
-    target_index is the correct class label as an integer.
-
-    logits: (C,)
-    target_index: int in [0, C)
-
-    Classes:
-        0 = cat
-        1 = dog
-        2 = fish
-
-    logits = [1.5, 0.2, -0.3]
-    target_index = 2 (this is expected to be "fish")
-
-    Interpretation:
-        cat: 1.5
-        dog: 0.2
-        fish: -0.3
-
-    ...
-
-    exp([1.5, 0.2, -0.3]) → normalized → probs
-
-    probs ≈ [0.65, 0.23, 0.12]
-
-    Which means:
-        Model thinks “cat” with probability 65%
-        Model thinks “dog” with probability 23%
-        Model thinks “fish” with probability 12%
-
-    This was expected as fish, so it will be a high loss...
-
-    loss = - log(prob_of_correct_class)
-    loss = - log(0.12)
-    loss ≈ 2.12  (a high loss)
-
-    """
-    # For numerical stability
-    shifted = logits - np.max(logits)
-    exp = np.exp(shifted)
-    probs = exp / np.sum(exp)
-
-    # Cross entropy loss: -log p_target
-    loss = -np.log(probs[target_index] + 1e-12)
-    return float(loss)
-
-
-
-# ===== scorch_adaptive_avg_pool2d.py =====
-
-# scorch/scorch_adaptive_avg_pool2d.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchAdaptiveAvgPool2d(ScorchModule):
-    """
-    Adaptive average pooling for 2D inputs, matching PyTorch's behavior.
-
-    Supports:
-        - input:  (N, C, H, W)  → output: (N, C, H_out, W_out)
-        - input:  (C, H, W)     → output: (C, H_out, W_out)
-
-    Where (H_out, W_out) = output_size.
-
-    For each output index (oh, ow), the pooling region in the input is:
-
-        h_start = floor(oh     * H / H_out)
-        h_end   = ceil ((oh+1) * H / H_out)
-
-        w_start = floor(ow     * W / W_out)
-        w_end   = ceil ((ow+1) * W / W_out)
-
-    (implemented with exact integer math)
-
-    Forward:
-        y[n,c,oh,ow] = mean over x[n,c,h_start:h_end, w_start:w_end]
-
-    Backward:
-        dL/dx[n,c,h,w] = sum over all (oh,ow) whose region includes (h,w)
-                         grad_out[n,c,oh,ow] / area_region(oh,ow)
-    """
-
-    def __init__(self, output_size, name: str | None = None):
-        super().__init__()
-
-        # Normalize output_size to (H_out, W_out)
-        if isinstance(output_size, int):
-            output_size = (output_size, output_size)
-
-        if not (isinstance(output_size, (tuple, list)) and len(output_size) == 2):
-            raise ValueError(
-                f"ScorchAdaptiveAvgPool2d: output_size must be int or (h,w) tuple, "
-                f"got {output_size!r}"
-            )
-
-        H_out, W_out = int(output_size[0]), int(output_size[1])
-        if H_out <= 0 or W_out <= 0:
-            raise ValueError(
-                f"ScorchAdaptiveAvgPool2d: output_size elements must be > 0, "
-                f"got {output_size}"
-            )
-
-        self.output_size = (H_out, W_out)
-        self.name = name or f"ScorchAdaptiveAvgPool2d(output_size={self.output_size})"
-
-        # Caches
-        self._last_input_shape: tuple[int, int, int, int] | None = None
-        self._input_was_3d: bool = False
-
-        # Per-forward index maps for backward reuse
-        self._h_start = None
-        self._h_end = None
-        self._w_start = None
-        self._w_end = None
-
-    # ------------------------------------------------------
-    # Internal helpers to build pooling regions
-    # ------------------------------------------------------
-    @staticmethod
-    def _compute_region_indices(in_size: int, out_size: int):
-        """
-        Compute start/end indices for each output index, matching the
-        "adaptive" logic used in frameworks like PyTorch.
-
-        For each o in [0, out_size):
-            start = floor(o     * in_size / out_size)
-            end   = ceil ((o+1) * in_size / out_size)
-
-        Implemented with integer arithmetic to avoid floating rounding issues:
-
-            start = (o * in_size) // out_size
-            end   = ((o + 1) * in_size + out_size - 1) // out_size
-        """
-        starts = []
-        ends = []
-        for o in range(out_size):
-            start = (o * in_size) // out_size
-            end = ((o + 1) * in_size + out_size - 1) // out_size
-            # Clamp just in case
-            start = max(0, min(start, in_size))
-            end = max(start, min(end, in_size))
-            starts.append(start)
-            ends.append(end)
-        return starts, ends
-
-    # ------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray, shape (N,C,H,W) or (C,H,W)
-
-        returns:
-            y: shape (N,C,H_out,W_out) or (C,H_out,W_out)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        if x_arr.ndim == 3:
-            # (C,H,W) => (1,C,H,W)
-            self._input_was_3d = True
-            x_arr = x_arr[np.newaxis, ...]
-        elif x_arr.ndim == 4:
-            self._input_was_3d = False
-        else:
-            raise ValueError(
-                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
-            )
-
-        N, C, H, W = x_arr.shape
-        self._last_input_shape = (N, C, H, W)
-
-        H_out, W_out = self.output_size
-
-        # Precompute pooling regions
-        h_start, h_end = self._compute_region_indices(H, H_out)
-        w_start, w_end = self._compute_region_indices(W, W_out)
-
-        self._h_start = h_start
-        self._h_end = h_end
-        self._w_start = w_start
-        self._w_end = w_end
-
-        # Allocate output
-        y = np.zeros((N, C, H_out, W_out), dtype=np.float32)
-
-        for n in range(N):
-            for c in range(C):
-                for oh in range(H_out):
-                    hs = h_start[oh]
-                    he = h_end[oh]
-                    h_len = he - hs
-                    if h_len <= 0:
-                        continue
-
-                    for ow in range(W_out):
-                        ws = w_start[ow]
-                        we = w_end[ow]
-                        w_len = we - ws
-                        if w_len <= 0:
-                            continue
-
-                        region = x_arr[n, c, hs:he, ws:we]
-                        area = float(h_len * w_len)
-                        y[n, c, oh, ow] = region.sum() / area
-
-        if self._input_was_3d:
-            return y[0]  # (C,H_out,W_out)
-        else:
-            return y     # (N,C,H_out,W_out)
-
-    # ------------------------------------------------------
-    # Backward
-    # ------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output:
-            - If input was 4D: (N,C,H_out,W_out)
-            - If input was 3D: (C,H_out,W_out)
-
-        returns:
-            grad_input with same shape as original x:
-            - (N,C,H,W) or (C,H,W)
-        """
-        if self._last_input_shape is None:
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        if self._h_start is None or self._w_start is None:
-            raise RuntimeError(f"{self.name}: region indices missing; forward not run?")
-
-        N, C, H, W = self._last_input_shape
-        H_out, W_out = self.output_size
-        h_start = self._h_start
-        h_end = self._h_end
-        w_start = self._w_start
-        w_end = self._w_end
-
-        g_out = np.asarray(grad_output, dtype=np.float32)
-
-        # Normalize grad_output shape to 4D
-        if self._input_was_3d:
-            if g_out.ndim != 3 or g_out.shape[0] != C:
-                raise ValueError(
-                    f"{self.name}: grad_output for 3D input must be (C,H_out,W_out), "
-                    f"got {g_out.shape}"
-                )
-            g_out = g_out[np.newaxis, ...]  # (1,C,H_out,W_out)
-        else:
-            if g_out.ndim != 4 or g_out.shape != (N, C, H_out, W_out):
-                raise ValueError(
-                    f"{self.name}: grad_output for 4D input must be (N,C,H_out,W_out), "
-                    f"got {g_out.shape}"
-                )
-
-        grad_x = np.zeros((N, C, H, W), dtype=np.float32)
-
-        for n in range(N):
-            for c in range(C):
-                for oh in range(H_out):
-                    hs = h_start[oh]
-                    he = h_end[oh]
-                    h_len = he - hs
-                    if h_len <= 0:
-                        continue
-
-                    for ow in range(W_out):
-                        ws = w_start[ow]
-                        we = w_end[ow]
-                        w_len = we - ws
-                        if w_len <= 0:
-                            continue
-
-                        go = g_out[n, c, oh, ow]
-                        area = float(h_len * w_len)
-                        if area <= 0:
-                            continue
-
-                        share = go / area
-                        for h_idx in range(hs, he):
-                            for w_idx in range(ws, we):
-                                grad_x[n, c, h_idx, w_idx] += share
-
-        if self._input_was_3d:
-            return grad_x[0]  # (C,H,W)
-        else:
-            return grad_x     # (N,C,H,W)
-
-    # ------------------------------------------------------
-    # Parameters / grads
-    # ------------------------------------------------------
-    def parameters(self):
-        # No learnable parameters
-        return []
-
-    def zero_grad(self):
-        # Nothing to reset
-        pass
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_conv2d.py =====
-
-# scorch/scorch_conv2d.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchConv2d(ScorchModule):
-    """
-    Pure loop-based reference implementation of a 2D convolution.
-
-    Follows PyTorch semantics exactly:
-
-        input:   (N, C_in,  H_in,  W_in)
-        weight:  (C_out, C_in, K_h, K_w)
-        bias:    (C_out,)
-        output:  (N, C_out, H_out, W_out)
-
-    H_out, W_out computed using the standard formula:
-
-        H_out = floor((H_in + 2*pad_h - dilation_h*(K_h - 1) - 1) / stride_h + 1)
-        W_out = floor((W_in + 2*pad_w - dilation_w*(K_w - 1) - 1) / stride_w + 1)
-
-    All operations implemented via explicit nested python loops.
-    Ideal for debugging and correctness verification.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int | tuple[int, int],
-        stride: int | tuple[int, int] = 1,
-        padding: int | tuple[int, int] = 0,
-        dilation: int | tuple[int, int] = 1,
-        name: str | None = None,
-    ):
-        super().__init__()
-
-        self.in_channels = int(in_channels)
-        self.out_channels = int(out_channels)
-
-        # Normalize kernel size
-        if isinstance(kernel_size, int):
-            self.k_h = self.k_w = kernel_size
-        else:
-            self.k_h, self.k_w = kernel_size
-
-        # Normalize stride
-        if isinstance(stride, int):
-            self.s_h = self.s_w = stride
-        else:
-            self.s_h, self.s_w = stride
-
-        # Normalize padding
-        if isinstance(padding, int):
-            self.p_h = self.p_w = padding
-        else:
-            self.p_h, self.p_w = padding
-
-        # Normalize dilation
-        if isinstance(dilation, int):
-            self.d_h = self.d_w = dilation
-        else:
-            self.d_h, self.d_w = dilation
-
-        self.name = name or (
-            f"ScorchConv2d(in={in_channels}, out={out_channels}, "
-            f"kernel=({self.k_h},{self.k_w}), stride=({self.s_h},{self.s_w}), "
-            f"padding=({self.p_h},{self.p_w}), dilation=({self.d_h},{self.d_w}))"
-        )
-
-        # ----------------------------------------------------------
-        # Parameter initialization (Kaiming-ish)
-        # W shape: (C_out, C_in, K_h, K_w)
-        # b shape: (C_out,)
-        # ----------------------------------------------------------
-        fan_in = self.in_channels * self.k_h * self.k_w
-        limit = 1.0 / np.sqrt(fan_in)
-
-        self.W = np.random.uniform(
-            -limit, +limit,
-            size=(self.out_channels, self.in_channels, self.k_h, self.k_w)
-        ).astype(np.float32)
-
-        self.b = np.zeros((self.out_channels,), dtype=np.float32)
-
-        # Gradient buffers
-        self.grad_W = np.zeros_like(self.W)
-        self.grad_b = np.zeros_like(self.b)
-
-        # Cache for backward
-        self._last_x = None
-        self._last_output_shape = None
-
-    # --------------------------------------------------------------
-    # Forward
-    # --------------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray (N, C_in, H_in, W_in)
-        returns: np.ndarray (N, C_out, H_out, W_out)
-        """
-        x = np.asarray(x, dtype=np.float32)
-
-        if x.ndim != 4:
-            raise ValueError(
-                f"{self.name}: Expected 4D input (N,C,H,W), got {x.shape}"
-            )
-
-        N, C_in, H_in, W_in = x.shape
-
-        if C_in != self.in_channels:
-            raise ValueError(
-                f"{self.name}: Expected {self.in_channels} input channels, "
-                f"got {C_in}"
-            )
-
-        # Compute output shape
-        H_out = ((H_in + 2*self.p_h - self.d_h*(self.k_h - 1) - 1)
-                 // self.s_h + 1)
-
-        W_out = ((W_in + 2*self.p_w - self.d_w*(self.k_w - 1) - 1)
-                 // self.s_w + 1)
-
-        # Allocate output
-        y = np.zeros((N, self.out_channels, H_out, W_out), dtype=np.float32)
-
-        # Pad the input
-        x_padded = np.pad(
-            x,
-            pad_width=(
-                (0, 0),     # batch
-                (0, 0),     # channels
-                (self.p_h, self.p_h),
-                (self.p_w, self.p_w),
-            ),
-            mode="constant",
-            constant_values=0.0,
-        )
-
-        # ----------------------------------------------------------
-        # Pure nested loops:
-        #   for each batch, each output channel,
-        #   each output pixel, each input channel,
-        #   each kernel element...
-        # ----------------------------------------------------------
-        for n in range(N):
-            for c_out in range(self.out_channels):
-                for oy in range(H_out):
-                    in_y_origin = oy * self.s_h
-                    for ox in range(W_out):
-                        in_x_origin = ox * self.s_w
-
-                        acc = self.b[c_out]
-
-                        for c_in in range(self.in_channels):
-                            for ky in range(self.k_h):
-                                iy = in_y_origin + ky * self.d_h
-                                for kx in range(self.k_w):
-                                    ix = in_x_origin + kx * self.d_w
-
-                                    acc += (
-                                        self.W[c_out, c_in, ky, kx] *
-                                        x_padded[n, c_in, iy, ix]
-                                    )
-
-                        y[n, c_out, oy, ox] = acc
-
-        # Save for backward
-        self._last_x = x
-        self._last_output_shape = (H_out, W_out)
-
-        return y
-
-    # --------------------------------------------------------------
-    # Backward
-    # --------------------------------------------------------------
-    def backward(self, grad_out):
-        """
-        grad_out: np.ndarray (N, C_out, H_out, W_out)
-        returns: grad_input (N, C_in, H_in, W_in)
-        """
-        if self._last_x is None:
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        x = self._last_x
-        N, C_in, H_in, W_in = x.shape
-        H_out, W_out = self._last_output_shape
-
-        grad_out = np.asarray(grad_out, dtype=np.float32)
-
-        # Allocate gradients
-        grad_x = np.zeros_like(x, dtype=np.float32)
-        self.grad_W.fill(0.0)
-        self.grad_b.fill(0.0)
-
-        # Pad x and grad_x so indexing aligns
-        x_pad = np.pad(
-            x,
-            ((0,0),(0,0),(self.p_h,self.p_h),(self.p_w,self.p_w)),
-            mode="constant",
-        )
-        grad_x_pad = np.zeros_like(x_pad, dtype=np.float32)
-
-        # --------------------------------------------------------------
-        # Compute gradients:
-        #   grad_b[c_out] += grad_out[:,c_out,:,:]
-        #   grad_W += x * grad_out
-        #   grad_x += W * grad_out
-        # --------------------------------------------------------------
-        for n in range(N):
-            for c_out in range(self.out_channels):
-                for oy in range(H_out):
-                    in_y_origin = oy * self.s_h
-                    for ox in range(W_out):
-                        in_x_origin = ox * self.s_w
-
-                        go = grad_out[n, c_out, oy, ox]
-
-                        # Bias gradient
-                        self.grad_b[c_out] += go
-
-                        # Weight + Input gradients
-                        for c_in in range(self.in_channels):
-                            for ky in range(self.k_h):
-                                iy = in_y_origin + ky * self.d_h
-                                for kx in range(self.k_w):
-                                    ix = in_x_origin + kx * self.d_w
-
-                                    # dL/dW
-                                    self.grad_W[c_out, c_in, ky, kx] += (
-                                        x_pad[n, c_in, iy, ix] * go
-                                    )
-
-                                    # dL/dx
-                                    grad_x_pad[n, c_in, iy, ix] += (
-                                        self.W[c_out, c_in, ky, kx] * go
-                                    )
-
-        # Remove padding from grad_x
-        grad_x = grad_x_pad[
-            :,
-            :,
-            self.p_h:self.p_h+H_in,
-            self.p_w:self.p_w+W_in,
-        ]
-
-        return grad_x
-
-    # --------------------------------------------------------------
-    # Parameter handling
-    # --------------------------------------------------------------
-    def parameters(self):
-        return [self.W, self.b]
-
-    def zero_grad(self):
-        self.grad_W.fill(0.0)
-        self.grad_b.fill(0.0)
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_conv2d_fast.py =====
-
-# scorch/scorch_conv2d_fast.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-
-
-def im2col(
-    x, 
-    k_h, k_w, 
-    s_h, s_w, 
-    p_h, p_w, 
-    d_h, d_w
-):
-    """
-    Convert (N, C, H, W) → (N, C*k_h*k_w, H_out*W_out) using im2col.
-    """
-
-    N, C, H, W = x.shape
-
-    H_out = ((H + 2*p_h - d_h*(k_h - 1) - 1) // s_h) + 1
-    W_out = ((W + 2*p_w - d_w*(k_w - 1) - 1) // s_w) + 1
-
-    # Pad input
-    x_padded = np.pad(
-        x,
-        pad_width=(
-            (0, 0),
-            (0, 0),
-            (p_h, p_h),
-            (p_w, p_w)
-        ),
-        mode="constant"
-    )
-
-    # Allocate output matrix
-    cols = np.zeros((N, C * k_h * k_w, H_out * W_out), dtype=np.float32)
-
-    out_col = 0
-    for oy in range(H_out):
-        in_y_origin = oy * s_h
-        for ox in range(W_out):
-            in_x_origin = ox * s_w
-
-            # Gather all kernel positions for this output pixel
-            patch_idx = 0
-            for c in range(C):
-                for ky in range(k_h):
-                    iy = in_y_origin + ky * d_h
-                    for kx in range(k_w):
-                        ix = in_x_origin + kx * d_w
-
-                        cols[:, patch_idx, out_col] = x_padded[:, c, iy, ix]
-                        patch_idx += 1
-
-            out_col += 1
-
-    return cols  # (N, C*k_h*k_w, H_out*W_out)
-
-
-def col2im(
-    cols, 
-    x_shape, 
-    k_h, k_w, 
-    s_h, s_w, 
-    p_h, p_w, 
-    d_h, d_w
-):
-    """
-    Inverse of im2col:
-    Convert (N, C*k_h*k_w, H_out*W_out) → (N, C, H, W)
-    by adding contributions back into padded input space.
-    """
-
-    N, C, H, W = x_shape
-
-    H_out = ((H + 2*p_h - d_h*(k_h - 1) - 1) // s_h) + 1
-    W_out = ((W + 2*p_w - d_w*(k_w - 1) - 1) // s_w) + 1
-
-    x_padded = np.zeros((N, C, H + 2*p_h, W + 2*p_w), dtype=np.float32)
-
-    out_col = 0
-    for oy in range(H_out):
-        in_y_origin = oy * s_h
-        for ox in range(W_out):
-            in_x_origin = ox * s_w
-
-            patch_idx = 0
-            for c in range(C):
-                for ky in range(k_h):
-                    iy = in_y_origin + ky * d_h
-                    for kx in range(k_w):
-                        ix = in_x_origin + kx * d_w
-
-                        x_padded[:, c, iy, ix] += cols[:, patch_idx, out_col]
-                        patch_idx += 1
-
-            out_col += 1
-
-    # Remove padding
-    return x_padded[:, :, p_h:p_h+H, p_w:p_w+W]
-
-
-class ScorchConv2dFast(ScorchModule):
-    """
-    High-performance im2col + matmul Conv2d.
-    Produces identical results to ScorchConv2d (nested loop version),
-    but runs dramatically faster.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int | tuple[int, int],
-        stride: int | tuple[int, int] = 1,
-        padding: int | tuple[int, int] = 0,
-        dilation: int | tuple[int, int] = 1,
-        name: str | None = None,
-    ):
-        super().__init__()
-
-        self.in_channels = int(in_channels)
-        self.out_channels = int(out_channels)
-
-        # Normalize kernel size
-        if isinstance(kernel_size, int):
-            self.k_h = self.k_w = kernel_size
-        else:
-            self.k_h, self.k_w = kernel_size
-
-        # Normalize stride
-        if isinstance(stride, int):
-            self.s_h = self.s_w = stride
-        else:
-            self.s_h, self.s_w = stride
-
-        # Normalize padding
-        if isinstance(padding, int):
-            self.p_h = self.p_w = padding
-        else:
-            self.p_h, self.p_w = padding
-
-        # Normalize dilation
-        if isinstance(dilation, int):
-            self.d_h = self.d_w = dilation
-        else:
-            self.d_h, self.d_w = dilation
-
-        self.name = name or (
-            f"ScorchConv2dFast(in={in_channels}, out={out_channels}, "
-            f"kernel=({self.k_h},{self.k_w}), stride=({self.s_h},{self.s_w}), "
-            f"padding=({self.p_h},{self.p_w}), dilation=({self.d_h},{self.d_w}))"
-        )
-
-        # Parameter initialization
-        fan_in = self.in_channels * self.k_h * self.k_w
-        limit = 1.0 / np.sqrt(fan_in)
-
-        self.W = np.random.uniform(
-            -limit, +limit,
-            size=(self.out_channels, self.in_channels, self.k_h, self.k_w)
-        ).astype(np.float32)
-
-        self.b = np.zeros((self.out_channels,), dtype=np.float32)
-
-        # Grad buffers
-        self.grad_W = np.zeros_like(self.W)
-        self.grad_b = np.zeros_like(self.b)
-
-        # Cache
-        self._last_cols = None
-        self._last_x_shape = None
-        self._H_out = None
-        self._W_out = None
-
-    # ----------------------------------------------------------
-    # Forward
-    # ----------------------------------------------------------
-    def forward(self, x):
-        x = np.asarray(x, dtype=np.float32)
-
-        if x.ndim != 4:
-            raise ValueError(
-                f"{self.name}: Expected 4D input (N,C,H,W), got {x.shape}"
-            )
-
-        N, C, H, W = x.shape
-
-        # Compute output dims
-        H_out = ((H + 2*self.p_h - self.d_h*(self.k_h - 1) - 1) // self.s_h) + 1
-        W_out = ((W + 2*self.p_w - self.d_w*(self.k_w - 1) - 1) // self.s_w) + 1
-
-        # Store shapes for backward
-        self._last_x_shape = (N, C, H, W)
-        self._H_out = H_out
-        self._W_out = W_out
-
-        # Convert input into column matrix
-        cols = im2col(
-            x,
-            self.k_h, self.k_w,
-            self.s_h, self.s_w,
-            self.p_h, self.p_w,
-            self.d_h, self.d_w
-        )  # (N, C*k_h*k_w, H_out*W_out)
-
-        self._last_cols = cols
-
-        # Reshape weights for matmul
-        W_mat = self.W.reshape(self.out_channels, -1)  # (C_out, C_in*k_h*k_w)
-
-        # Allocate output
-        y = np.zeros((N, self.out_channels, H_out, W_out), dtype=np.float32)
-
-        # For each batch:
-        for n in range(N):
-            # matmul: (C_out, K) @ (K, H_out*W_out)
-            y_n = W_mat @ cols[n] + self.b.reshape(-1, 1)
-            y[n] = y_n.reshape(self.out_channels, H_out, W_out)
-
-        return y
-
-    # ----------------------------------------------------------
-    # Backward
-    # ----------------------------------------------------------
-    def backward(self, grad_out):
-        """
-        grad_out: (N, C_out, H_out, W_out)
-        returns: grad_x of shape (N, C_in, H, W)
-        """
-        if self._last_cols is None:
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        cols = self._last_cols
-        N, C, H, W = self._last_x_shape
-        H_out = self._H_out
-        W_out = self._W_out
-
-        grad_out = np.asarray(grad_out, dtype=np.float32)
-
-        # Flatten grad_out for matmul
-        grad_out_2d = grad_out.reshape(N, self.out_channels, H_out * W_out)
-
-        # Reset grads
-        self.grad_W.fill(0.0)
-        self.grad_b.fill(0.0)
-
-        # For matmul shapes
-        W_mat = self.W.reshape(self.out_channels, -1)      # (C_out, K)
-        grad_W_mat = np.zeros_like(W_mat)                  # (C_out, K)
-
-        # Output gradients accumulate into params
-        for n in range(N):
-            go = grad_out_2d[n]   # (C_out, H_out*W_out)
-
-            # grad_b
-            self.grad_b += go.sum(axis=1)
-
-            # grad_W_mat += go @ cols[n].T
-            grad_W_mat += go @ cols[n].transpose(1, 0)
-
-        # Reshape grad_W back
-        self.grad_W = grad_W_mat.reshape(
-            self.out_channels, self.in_channels, self.k_h, self.k_w
-        )
-
-        # --------------------------------------------------
-        # Compute grad_x via W^T * grad_out, then col2im
-        # --------------------------------------------------
-        grad_cols = np.zeros_like(cols)
-
-        W_mat_T = W_mat.T  # (K, C_out)
-
-        for n in range(N):
-            go = grad_out_2d[n]       # (C_out, H_out*W_out)
-            grad_cols[n] = W_mat_T @ go   # (K, H_out*W_out)
-
-        # Convert column gradients back to image shape
-        grad_x = col2im(
-            grad_cols,
-            (N, C, H, W),
-            self.k_h, self.k_w,
-            self.s_h, self.s_w,
-            self.p_h, self.p_w,
-            self.d_h, self.d_w
-        )
-
-        return grad_x
-
-    # ----------------------------------------------------------
-    # Parameter handling
-    # ----------------------------------------------------------
-    def parameters(self):
-        return [self.W, self.b]
-
-    def zero_grad(self):
-        self.grad_W.fill(0.0)
-        self.grad_b.fill(0.0)
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_linear.py =====
-
-# scorch/scorch_linear.py
-from __future__ import annotations
-import math
-import numpy as np
-
-from scorch.nn_functional import linear_forward
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchLinear(ScorchModule):
-    """
-    A minimal fully-connected layer:
-        y = W @ x + b
-
-    Shapes (conceptually):
-        Input features:  D = in_features
-        Output features: C = out_features
-
-    Forward:
-        x: (..., D)
-        W: (C, D)
-        b: (C,)
-        y: (..., C)
-
-        That is:
-            - if x is 1-D, shape (D,), y is (C,)
-            - if x is 2-D, shape (N, D), y is (N, C)
-            - if x is 3-D, shape (B, T, D), y is (B, T, C)
-            - etc.
-
-    Backward:
-        grad_output: dL/dy, same shape as y = (..., C)
-        Produces:
-            grad_W: dL/dW, shape (C, D)
-            grad_b: dL/db, shape (C,)
-            grad_input: dL/dx, shape (..., D)
-    """
-
-    def __init__(self, in_features: int, out_features: int, name: str | None = None):
-        super().__init__()
-        self.in_features = int(in_features)
-        self.out_features = int(out_features)
-        self.name = name or f"ScorchLinear({in_features}->{out_features})"
-
-        # Parameter initialization (Xavier-ish)
-        limit = 1.0 / math.sqrt(self.in_features)
-        self.W = np.random.uniform(
-            -limit, +limit,
-            size=(self.out_features, self.in_features)
-        ).astype(np.float32)
-
-        self.b = np.zeros((self.out_features,), dtype=np.float32)
-
-        # Gradients
-        self.grad_W = np.zeros_like(self.W)
-        self.grad_b = np.zeros_like(self.b)
-
-        # Cache for backward: we need x with its full shape
-        self._last_x: np.ndarray | None = None
-
-    # ------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray of shape (..., in_features)
-        returns: np.ndarray of shape (..., out_features)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        if x_arr.ndim < 1:
-            raise ValueError(
-                f"{self.name}: Expected at least 1-D input (..., D), got {x_arr.shape}"
-            )
-
-        if x_arr.shape[-1] != self.in_features:
-            raise ValueError(
-                f"{self.name}: Expected last dimension {self.in_features}, "
-                f"got {x_arr.shape[-1]}"
-            )
-
-        # Save for backward (full shape, not flattened)
-        self._last_x = x_arr.copy()
-
-        # ------------------------------------------------------------------
-        # Conceptual NumPy one-liner (kept for reference)
-        #
-        #   out = x_arr @ self.W.T + self.b
-        #
-        # However, we expand this into manual Python loops so each multiply /
-        # add is explicit for learning and debugging.
-        # ------------------------------------------------------------------
-
-        # Handle the simple 1-D case (D,) directly via linear_forward:
-        if x_arr.ndim == 1:
-            # (Old behavior, still here and still readable)
-            # return self.W @ x_arr + self.b
-            return linear_forward(x_arr, self.W, self.b)
-
-        # General N-D case: (..., D)
-        original_shape = x_arr.shape          # (..., D)
-        leading_shape = original_shape[:-1]   # ...
-        D = self.in_features
-        C = self.out_features
-
-        # Flatten all leading dimensions into a single "batch" dimension.
-        batch_size = int(np.prod(leading_shape)) if leading_shape else 1
-
-        x_flat = x_arr.reshape(batch_size, D)            # (B, D)
-        out_flat = np.zeros((batch_size, C), dtype=np.float32)  # (B, C)
-
-        # Manual forward: for each sample n, and each output neuron i,
-        # compute dot(W[i, :], x[n, :]) + b[i]
-        for n in range(batch_size):          # each sample in the batch
-            for i in range(C):              # each output neuron
-                acc = 0.0
-                for j in range(D):          # each input feature
-                    acc += self.W[i, j] * x_flat[n, j]
-                acc += self.b[i]
-                out_flat[n, i] = acc
-
-        # Reshape back to (..., C)
-        out = out_flat.reshape(*leading_shape, C)
-        return out
-
-    # ------------------------------------------------------
-    # Backward pass
-    # ------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output: dL/dy, same shape as forward output (..., out_features)
-
-        Computes:
-            grad_W (accumulated into self.grad_W)   shape (C, D)
-            grad_b (accumulated into self.grad_b)   shape (C,)
-        Returns:
-            grad_input: dL/dx, shape (..., in_features)
-        """
-        if self._last_x is None:
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        g_out = np.asarray(grad_output, dtype=np.float32)
-        x = self._last_x
-
-        if g_out.ndim < 1:
-            raise ValueError(
-                f"{self.name}: grad_output must be at least 1-D (..., C), "
-                f"got {g_out.shape}"
-            )
-
-        if g_out.shape[-1] != self.out_features:
-            raise ValueError(
-                f"{self.name}: grad_output last dimension {g_out.shape[-1]} "
-                f"does not match (out_features,) = ({self.out_features},)"
-            )
-
-        if x.shape[:-1] != g_out.shape[:-1]:
-            raise ValueError(
-                f"{self.name}: grad_output leading shape {g_out.shape[:-1]} "
-                f"does not match input leading shape {x.shape[:-1]}"
-            )
-
-        D = self.in_features
-        C = self.out_features
-
-        # ------------------------------------------------------------------
-        # 1-D special case: keep it as close as possible to your old code
-        # ------------------------------------------------------------------
-        if x.ndim == 1 and g_out.ndim == 1:
-            # x: (D,)
-            # g_out: (C,)
-
-            # dL/dW = outer(grad_output, x)
-            # grad_W = np.outer(g_out, x)  # (C, D)
-
-            # grad_W is the rate of change in error loss with respect to weight.
-            # ...
-            # The derivative of the loss with respect to weight W[i,j].
-            # ...
-            # grad_W[i,j] ==> “How much would the total loss change if we
-            # nudged weight W[i,j] upward by a tiny amount?”
-
-            grad_W = np.zeros((C, D), dtype=np.float32)
-            for i in range(C):        # for each output neuron
-                for j in range(D):    # for each input feature
-                    grad_W[i][j] = g_out[i] * x[j]
-
-            # dL/db = grad_output
-            grad_b = g_out  # (C,)
-
-            # dL/dx = W^T @ grad_output
-            # ...
-            # grad_input = Wᵀ @ g_out because each input
-            # feature receives error signals from every output
-            # neuron, scaled by the weight that connects them...
-            # and that weighted sum is a dot product.
-
-            # grad_input = self.W.T @ g_out  # (D,)
-
-            grad_input = np.zeros(D, dtype=np.float32)
-            for j in range(D):               # for each input feature x[j]
-                acc = 0.0
-                for i in range(C):           # sum over all output neurons
-                    acc += self.W[i][j] * g_out[i]
-                grad_input[j] = acc
-
-            # Accumulate gradients (so multiple samples can add up)
-            self.grad_W += grad_W
-            self.grad_b += grad_b
-
-            return grad_input
-
-        # ------------------------------------------------------------------
-        # General N-D case: x shape (..., D), grad_output shape (..., C)
-        #
-        # We flatten to:
-        #   x_flat:       (B, D)
-        #   g_out_flat:   (B, C)
-        #
-        # Then:
-        #   grad_W[i,j] = Σ_n  g_out[n,i] * x[n,j]
-        #   grad_b[i]   = Σ_n  g_out[n,i]
-        #   grad_input[n,j] = Σ_i W[i,j] * g_out[n,i]
-        # ------------------------------------------------------------------
-        leading_shape = x.shape[:-1]
-        batch_size = int(np.prod(leading_shape)) if leading_shape else 1
-
-        x_flat = x.reshape(batch_size, D)            # (B, D)
-        g_out_flat = g_out.reshape(batch_size, C)    # (B, C)
-
-        grad_W = np.zeros((C, D), dtype=np.float32)
-        grad_b = np.zeros((C,), dtype=np.float32)
-        grad_input_flat = np.zeros((batch_size, D), dtype=np.float32)
-
-        # Manual accumulation over the batch and feature dimensions
-        for n in range(batch_size):       # each sample
-            for i in range(C):           # each output neuron
-                gi = g_out_flat[n, i]    # gradient flowing into neuron i
-                grad_b[i] += gi          # dL/db accumulates over batch
-
-                # grad_W[i,j] = Σ_n g[n,i] * x[n,j]
-                # grad_input[n,j] = Σ_i W[i,j] * g[n,i]
-                for j in range(D):
-                    xnj = x_flat[n, j]
-                    grad_W[i, j] += gi * xnj
-                    grad_input_flat[n, j] += self.W[i, j] * gi
-
-        # Reshape grad_input back to (..., D)
-        grad_input = grad_input_flat.reshape(*leading_shape, D)
-
-        # Accumulate gradients (so multiple samples / batches can add up)
-        self.grad_W += grad_W
-        self.grad_b += grad_b
-
-        return grad_input
-
-    # ------------------------------------------------------
-    # Parameter + gradient handling
-    # ------------------------------------------------------
-    def parameters(self):
-        return [self.W, self.b]
-
-    def zero_grad(self):
-        self.grad_W.fill(0.0)
-        self.grad_b.fill(0.0)
-
-    def __repr__(self):
-        return f"{self.name}(W={self.W.shape}, b={self.b.shape})"
-
-
-
-# ===== scorch_loss.py =====
-
-# scorch/scorch_loss.py
-from __future__ import annotations
-
-from typing import Optional, Union
-import numpy as np
-
-from .scorch_module import ScorchModule
-from .scorch_reduction import ScorchReduction
-
-# Allow both "mean"/"sum"/"none" and ScorchReduction.MEAN etc.
-ReductionLike = Union[str, ScorchReduction]
-
-
-class ScorchLoss(ScorchModule):
-    """
-    Base class for Scorch loss functions.
-
-    - Subclasses should implement forward(input, target).
-    - Training code should NOT call .backward() on loss modules in this framework.
-      Instead, use dedicated functional helpers (e.g. cross_entropy_with_grad)
-      that return both (loss, grad_input).
-
-    Attributes:
-        reduction: ScorchReduction enum (NONE | MEAN | SUM)
-    """
-
-    def __init__(self, reduction: ReductionLike = ScorchReduction.MEAN) -> None:
-        super().__init__()
-
-        # Normalize to enum
-        if isinstance(reduction, ScorchReduction):
-            self.reduction: ScorchReduction = reduction
-        else:
-            # assume string-like
-            try:
-                self.reduction = ScorchReduction(str(reduction).lower())
-            except Exception as e:
-                raise ValueError(
-                    f"Invalid reduction: {reduction!r}. "
-                    f"Expected one of: {[r.value for r in ScorchReduction]}"
-                ) from e
-
-    # PyTorch-style call semantics: loss(input, target)
-    def forward(self, input: np.ndarray, target: np.ndarray):
-        """
-        Compute the loss.
-
-        Subclasses must override this method.
-
-        Typical behavior:
-          - If reduction == NONE: return per-sample losses, shape (N,).
-          - If reduction == MEAN or SUM: return a scalar float.
-        """
-        raise NotImplementedError(f"{self.__class__.__name__}.forward not implemented.")
-
-    def backward(self, grad_output) -> None:
-        """
-        For now we DO NOT support calling backward() on loss modules.
-
-        In Scorch, the typical pattern is:
-            loss, grad_logits = cross_entropy_with_grad(logits, targets)
-
-        So if this gets called accidentally, we want a loud failure,
-        not a silent no-op.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__}.backward is not supported. "
-            "Use explicit functional helpers that return (loss, grad_input)."
-        )
-
-    # --------------------------------------------------
-    # Helpers for subclasses
-    # --------------------------------------------------
-    def _reduce(self, per_sample: np.ndarray) -> float | np.ndarray:
-        """
-        Apply reduction (NONE | MEAN | SUM) to a 1D array of per-sample losses.
-        """
-        per_sample = np.asarray(per_sample, dtype=np.float32)
-
-        # If already scalar, just return float
-        if per_sample.ndim == 0:
-            return float(per_sample)
-
-        match self.reduction:
-            case ScorchReduction.MEAN:
-                if per_sample.size == 0:
-                    # You could choose np.nan here to mimic PyTorch more strictly
-                    return 0.0
-                return float(per_sample.mean())
-
-            case ScorchReduction.SUM:
-                if per_sample.size == 0:
-                    return 0.0
-                return float(per_sample.sum())
-
-            case ScorchReduction.NONE:
-                return per_sample
-
-            case _:
-                # Should be impossible if __init__ is correct
-                raise RuntimeError(f"Unknown reduction: {self.reduction}")
-
-    def parameters(self):
-        """
-        Loss modules don't have learnable parameters in this engine.
-        """
-        return []
-
-    def zero_grad(self) -> None:
-        """
-        Nothing to reset for stateless loss modules.
-        """
-        # No-op; keeps ScorchModule contract satisfied.
-        pass
-
-
-class ScorchWeightedLoss(ScorchLoss):
-    """
-    Base class for losses that support per-class weights, like CrossEntropyLoss.
-
-    Attributes:
-        weight: Optional np.ndarray of shape (num_classes,)
-    """
-
-    def __init__(
-        self,
-        weight: Optional[np.ndarray] = None,
-        reduction: ReductionLike = ScorchReduction.MEAN,
-    ) -> None:
-        super().__init__(reduction=reduction)
-
-        if weight is not None:
-            w = np.asarray(weight, dtype=np.float32)
-            if w.ndim != 1:
-                raise ValueError(
-                    f"weight must be 1D (num_classes,), got shape {w.shape}"
-                )
-            self.weight: Optional[np.ndarray] = w
-        else:
-            self.weight = None
-
-
-# -------------------------------------------------------------------
-# Functional: cross_entropy_with_grad
-# -------------------------------------------------------------------
-
-def cross_entropy_with_grad(
-    logits: np.ndarray,
-    targets: np.ndarray,
-    weight: Optional[np.ndarray] = None,
-    reduction: ReductionLike = ScorchReduction.MEAN,
-) -> tuple[float | np.ndarray, np.ndarray]:
-    """
-    Cross-entropy loss + gradient w.r.t. logits (like torch.nn.CrossEntropyLoss).
-
-    Args:
-        logits:  (N, C) float32 - raw scores from the final layer.
-        targets: (N,) int64     - class indices in [0, C).
-        weight:  Optional (C,) float32 - per-class weights.
-        reduction: "none" | "mean" | "sum" or ScorchReduction enum.
-
-    Returns:
-        loss:
-            - scalar float if reduction is "mean" or "sum"
-            - (N,) float32 array if reduction is "none"
-        grad_logits: (N, C) float32 - dL/d(logits)
-    """
-    logits = np.asarray(logits, dtype=np.float32)
-    targets = np.asarray(targets, dtype=np.int64)
-
-    if logits.ndim != 2:
-        raise ValueError(f"Expected logits shape (N, C), got {logits.shape}")
-    if targets.ndim != 1:
-        raise ValueError(f"Expected targets shape (N,), got {targets.shape}")
-
-    N, C = logits.shape
-    if targets.shape[0] != N:
-        raise ValueError(
-            f"Targets length {targets.shape[0]} does not match batch size {N}"
-        )
-
-    # Normalize reduction to enum
-    if isinstance(reduction, ScorchReduction):
-        reduction_enum = reduction
-    else:
-        reduction_enum = ScorchReduction(str(reduction).lower())
-
-    # ------------------------------------
-    # Softmax probabilities (stable)
-    # ------------------------------------
-    shifted = logits - np.max(logits, axis=1, keepdims=True)  # (N, C)
-    exp = np.exp(shifted, dtype=np.float32)
-    probs = exp / np.sum(exp, axis=1, keepdims=True)          # (N, C)
-
-    # ------------------------------------
-    # Per-sample losses
-    # ------------------------------------
-    eps = 1e-12
-    p_correct = probs[np.arange(N), targets] + eps  # (N,)
-    per_sample_loss = -np.log(p_correct, dtype=np.float32)    # (N,)
-
-    if weight is not None:
-        weight = np.asarray(weight, dtype=np.float32)
-        if weight.shape != (C,):
-            raise ValueError(
-                f"weight must have shape (C,), got {weight.shape}, C={C}"
-            )
-        sample_weights = weight[targets]                    # (N,)
-        per_sample_loss = per_sample_loss * sample_weights  # weighted losses
-    else:
-        sample_weights = np.ones_like(per_sample_loss, dtype=np.float32)
-
-    # ------------------------------------
-    # Reduction
-    # ------------------------------------
-    if reduction_enum is ScorchReduction.NONE:
-        loss: float | np.ndarray = per_sample_loss.astype(np.float32)
-        normalizer = np.ones_like(sample_weights, dtype=np.float32)  # no scaling
-        denom = 1.0  # not used
-    else:
-        if weight is not None:
-            # PyTorch-style: mean = sum(weighted_losses) / sum(sample_weights)
-            weight_sum = float(np.sum(sample_weights))
-            if weight_sum <= 0.0:
-                # Degenerate; avoid div-zero
-                mean_loss = 0.0
-                denom = 1.0
-            else:
-                mean_loss = float(np.sum(per_sample_loss) / weight_sum)
-                denom = weight_sum
-        else:
-            mean_loss = float(per_sample_loss.mean())
-            denom = float(N)
-
-        if reduction_enum is ScorchReduction.MEAN:
-            loss = mean_loss
-        elif reduction_enum is ScorchReduction.SUM:
-            loss = float(np.sum(per_sample_loss))
-            denom = 1.0  # sum => no global scale in grad
-        else:
-            raise RuntimeError(f"Unknown reduction: {reduction_enum}")
-
-        # For gradient scaling below
-        normalizer = np.full_like(sample_weights, denom, dtype=np.float32)
-
-    # ------------------------------------
-    # Gradient w.r.t. logits
-    # ------------------------------------
-    grad_logits = probs.copy()                              # (N, C)
-    grad_logits[np.arange(N), targets] -= 1.0               # probs - one_hot
-
-    # Apply sample weights (if any)
-    grad_logits *= sample_weights[:, None]                  # (N, C)
-
-    # Apply reduction scaling:
-    # - NONE: normalizer is 1 -> no scaling
-    # - MEAN: divide by sum(weights) or N
-    # - SUM:  denom=1 -> no extra scaling
-    grad_logits /= normalizer[:, None]
-
-    return loss, grad_logits.astype(np.float32)
-
-
-# -------------------------------------------------------------------
-# Module: ScorchCrossEntropyLoss
-# -------------------------------------------------------------------
-
-class ScorchCrossEntropyLoss(ScorchWeightedLoss):
-    """
-    Module wrapper around cross_entropy_with_grad, like torch.nn.CrossEntropyLoss
-    (but WITHOUT autograd integration).
-
-    Usage pattern 1 (recommended for training):
-        loss, grad_logits = cross_entropy_with_grad(logits, targets, weight, reduction)
-        # use grad_logits for backprop via ScorchSequential.backward(...)
-
-    Usage pattern 2 (for metric-style use):
-        criterion = ScorchCrossEntropyLoss()
-        loss_value = criterion.forward(logits, targets)
-    """
-
-    def __init__(
-        self,
-        weight: Optional[np.ndarray] = None,
-        reduction: ReductionLike = ScorchReduction.MEAN,
-    ) -> None:
-        super().__init__(weight=weight, reduction=reduction)
-
-    def forward(self, input: np.ndarray, target: np.ndarray):
-        """
-        Compute the cross-entropy loss value (no gradient).
-
-        For gradient + loss together, call cross_entropy_with_grad(...)
-        directly instead of going through this module.
-        """
-        loss, _ = cross_entropy_with_grad(
-            logits=input,
-            targets=target,
-            weight=self.weight,
-            reduction=self.reduction,
-        )
-        return loss
-
-
-
-# ===== scorch_max_pool2d.py =====
-
-# scorch/scorch_max_pool2d.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchMaxPool2d(ScorchModule):
-    """
-    Pure loop-based reference implementation of 2D max pooling.
-
-    Semantics (matched to PyTorch nn.MaxPool2d):
-
-        Input:   (N, C, H_in, W_in)  or (C, H_in, W_in) for single sample
-        Output:  (N, C, H_out, W_out) or (C, H_out, W_out)
-
-    Parameters:
-        kernel_size:  int or (k_h, k_w)
-        stride:       int or (s_h, s_w) (defaults to kernel_size if None)
-        padding:      int or (p_h, p_w)
-        dilation:     int or (d_h, d_w)
-
-    Forward:
-        - Pads with -inf (so padded region never wins max).
-        - For each (n, c, oy, ox), takes max over the pooled window.
-
-    Backward:
-        - Gradient flows only to the location that held the max.
-        - We store the max coordinates during forward and scatter grad back.
-    """
-
-    def __init__(
-        self,
-        kernel_size: int | tuple[int, int],
-        stride: int | tuple[int, int] | None = None,
-        padding: int | tuple[int, int] = 0,
-        dilation: int | tuple[int, int] = 1,
-        name: str | None = None,
-    ):
-        super().__init__()
-
-        # Normalize kernel size
-        if isinstance(kernel_size, int):
-            self.k_h = self.k_w = kernel_size
-        else:
-            self.k_h, self.k_w = kernel_size
-
-        # Normalize stride (default to kernel_size if None)
-        if stride is None:
-            self.s_h = self.k_h
-            self.s_w = self.k_w
-        elif isinstance(stride, int):
-            self.s_h = self.s_w = stride
-        else:
-            self.s_h, self.s_w = stride
-
-        # Normalize padding
-        if isinstance(padding, int):
-            self.p_h = self.p_w = padding
-        else:
-            self.p_h, self.p_w = padding
-
-        # Normalize dilation
-        if isinstance(dilation, int):
-            self.d_h = self.d_w = dilation
-        else:
-            self.d_h, self.d_w = dilation
-
-        self.name = name or (
-            f"ScorchMaxPool2d(kernel=({self.k_h},{self.k_w}), "
-            f"stride=({self.s_h},{self.s_w}), "
-            f"padding=({self.p_h},{self.p_w}), "
-            f"dilation=({self.d_h},{self.d_w}))"
-        )
-
-        # Caches for backward
-        self._last_input_shape: tuple[int, int, int, int] | None = None
-        self._H_out: int | None = None
-        self._W_out: int | None = None
-        self._input_was_3d: bool = False
-
-        # Max locations in padded coordinates:
-        #   _max_y, _max_x: shape (N, C, H_out, W_out), ints
-        self._max_y: np.ndarray | None = None
-        self._max_x: np.ndarray | None = None
-
-    # ----------------------------------------------------------
-    # Forward
-    # ----------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray, shape (N, C, H, W) or (C, H, W)
-        returns: np.ndarray, shape (N, C, H_out, W_out) or (C, H_out, W_out)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        # Allow 3D (C,H,W) by promoting to N=1
-        if x_arr.ndim == 3:
-            self._input_was_3d = True
-            x_arr = x_arr[np.newaxis, ...]  # (1, C, H, W)
-        elif x_arr.ndim == 4:
-            self._input_was_3d = False
-        else:
-            raise ValueError(
-                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
-            )
-
-        N, C, H, W = x_arr.shape
-
-        # Compute output dims (same formula as conv)
-        H_out = ((H + 2 * self.p_h - self.d_h * (self.k_h - 1) - 1)
-                 // self.s_h + 1)
-        W_out = ((W + 2 * self.p_w - self.d_w * (self.k_w - 1) - 1)
-                 // self.s_w + 1)
-
-        if H_out <= 0 or W_out <= 0:
-            raise ValueError(
-                f"{self.name}: Non-positive output size "
-                f"H_out={H_out}, W_out={W_out} for input (H={H},W={W})"
-            )
-
-        # Pad with -inf so padding never wins the max
-        x_padded = np.pad(
-            x_arr,
-            pad_width=(
-                (0, 0),                 # batch
-                (0, 0),                 # channels
-                (self.p_h, self.p_h),   # height
-                (self.p_w, self.p_w),   # width
-            ),
-            mode="constant",
-            constant_values=-np.inf,
-        )
-
-        # Allocate output and max location caches
-        y = np.zeros((N, C, H_out, W_out), dtype=np.float32)
-        max_y = np.zeros((N, C, H_out, W_out), dtype=np.int32)
-        max_x = np.zeros((N, C, H_out, W_out), dtype=np.int32)
-
-        # ------------------------------------------------------
-        # Nested loops: N, C, H_out, W_out, then kernel window
-        # ------------------------------------------------------
-        for n in range(N):
-            for c in range(C):
-                for oy in range(H_out):
-                    in_y_origin = oy * self.s_h
-                    for ox in range(W_out):
-                        in_x_origin = ox * self.s_w
-
-                        best_val = -np.inf
-                        best_iy = 0
-                        best_ix = 0
-
-                        for ky in range(self.k_h):
-                            iy = in_y_origin + ky * self.d_h
-                            for kx in range(self.k_w):
-                                ix = in_x_origin + kx * self.d_w
-
-                                v = x_padded[n, c, iy, ix]
-                                # IMPORTANT: strict ">" to match np.argmax
-                                if v > best_val:
-                                    best_val = v
-                                    best_iy = iy
-                                    best_ix = ix
-
-                        y[n, c, oy, ox] = best_val
-                        max_y[n, c, oy, ox] = best_iy
-                        max_x[n, c, oy, ox] = best_ix
-
-        # Cache for backward
-        self._last_input_shape = (N, C, H, W)
-        self._H_out = H_out
-        self._W_out = W_out
-        self._max_y = max_y
-        self._max_x = max_x
-
-        if self._input_was_3d:
-            return y[0]  # (C, H_out, W_out)
-        else:
-            return y     # (N, C, H_out, W_out)
-
-    # ----------------------------------------------------------
-    # Backward
-    # ----------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output:
-            dL/dy, shape (N, C, H_out, W_out) or (C, H_out, W_out)
-
-        Returns:
-            dL/dx, shape (N, C, H, W) or (C, H, W)
-        """
-        if (
-            self._last_input_shape is None
-            or self._H_out is None
-            or self._W_out is None
-            or self._max_y is None
-            or self._max_x is None
-        ):
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        N, C, H, W = self._last_input_shape
-        H_out = self._H_out
-        W_out = self._W_out
-
-        g_out = np.asarray(grad_output, dtype=np.float32)
-
-        # Normalize grad_output shape to 4D
-        if self._input_was_3d:
-            if g_out.ndim != 3:
-                raise ValueError(
-                    f"{self.name}: grad_output for 3D input must be 3D "
-                    f"(C,H_out,W_out), got {g_out.shape}"
-                )
-            if g_out.shape != (C, H_out, W_out):
-                raise ValueError(
-                    f"{self.name}: grad_output shape {g_out.shape} does not match "
-                    f"(C,H_out,W_out)=({C},{H_out},{W_out})"
-                )
-            g_out = g_out[np.newaxis, ...]  # (1, C, H_out, W_out)
-        else:
-            if g_out.ndim != 4:
-                raise ValueError(
-                    f"{self.name}: grad_output for 4D input must be 4D "
-                    f"(N,C,H_out,W_out), got {g_out.shape}"
-                )
-            if g_out.shape != (N, C, H_out, W_out):
-                raise ValueError(
-                    f"{self.name}: grad_output shape {g_out.shape} does not match "
-                    f"(N,C,H_out,W_out)=({N},{C},{H_out},{W_out})"
-                )
-
-        # Grad wrt *padded* input
-        grad_x_padded = np.zeros(
-            (N, C, H + 2 * self.p_h, W + 2 * self.p_w),
-            dtype=np.float32,
-        )
-
-        max_y = self._max_y
-        max_x = self._max_x
-
-        # Scatter each grad_output element to its argmax location
-        for n in range(N):
-            for c in range(C):
-                for oy in range(H_out):
-                    for ox in range(W_out):
-                        iy = max_y[n, c, oy, ox]
-                        ix = max_x[n, c, oy, ox]
-                        grad_x_padded[n, c, iy, ix] += g_out[n, c, oy, ox]
-
-        # Remove padding
-        grad_x = grad_x_padded[
-            :,
-            :,
-            self.p_h:self.p_h + H,
-            self.p_w:self.p_w + W,
-        ]
-
-        if self._input_was_3d:
-            return grad_x[0]  # (C, H, W)
-        else:
-            return grad_x     # (N, C, H, W)
-
-    # ----------------------------------------------------------
-    # Parameters / grads
-    # ----------------------------------------------------------
-    def parameters(self):
-        # No learnable parameters
-        return []
-
-    def zero_grad(self):
-        # No parameter gradients to reset
-        pass
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_max_pool2d_fast.py =====
-
-# scorch/scorch_max_pool2d_fast.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-from scorch.scorch_conv2d_fast import col2im
-
-
-def im2col_maxpool(
-    x,
-    k_h, k_w,
-    s_h, s_w,
-    p_h, p_w,
-    d_h, d_w,
-):
-    """
-    im2col specialized for max-pooling:
-
-    Input:
-        x: (N, C, H, W)
-
-    Output:
-        cols: (N, C * k_h * k_w, H_out * W_out)
-
-    Uses padding with -inf so that padded regions never win the max.
-    """
-    x = np.asarray(x, dtype=np.float32)
-    N, C, H, W = x.shape
-
-    H_out = ((H + 2 * p_h - d_h * (k_h - 1) - 1) // s_h) + 1
-    W_out = ((W + 2 * p_w - d_w * (k_w - 1) - 1) // s_w) + 1
-
-    # Pad with -inf so padding is never chosen as max
-    x_padded = np.pad(
-        x,
-        pad_width=(
-            (0, 0),
-            (0, 0),
-            (p_h, p_h),
-            (p_w, p_w),
-        ),
-        mode="constant",
-        constant_values=-np.inf,
-    )
-
-    cols = np.zeros((N, C * k_h * k_w, H_out * W_out), dtype=np.float32)
-
-    out_col = 0
-    for oy in range(H_out):
-        in_y_origin = oy * s_h
-        for ox in range(W_out):
-            in_x_origin = ox * s_w
-
-            patch_idx = 0
-            for c in range(C):
-                for ky in range(k_h):
-                    iy = in_y_origin + ky * d_h
-                    for kx in range(k_w):
-                        ix = in_x_origin + kx * d_w
-
-                        cols[:, patch_idx, out_col] = x_padded[:, c, iy, ix]
-                        patch_idx += 1
-
-            out_col += 1
-
-    return cols  # (N, C*k_h*k_w, H_out*W_out)
-
-
-class ScorchMaxPool2dFast(ScorchModule):
-    """
-    High-performance 2D max pooling using im2col + NumPy ops.
-
-    Semantics:
-
-        Input:   (N, C, H_in, W_in)  or (C, H_in, W_in) for single sample
-        Output:  (N, C, H_out, W_out) or (C, H_out, W_out)
-
-    Parameters:
-        kernel_size:  int or (k_h, k_w)
-        stride:       int or (s_h, s_w) (defaults to kernel_size if None)
-        padding:      int or (p_h, p_w)
-        dilation:     int or (d_h, d_w)
-
-    Forward:
-        - Uses im2col_maxpool (padding=-inf) to build patches.
-        - Takes max over each patch.
-
-    Backward:
-        - Gradient flows only to the location that held the max in each patch.
-        - Implemented via scattering into a grad_cols matrix, then col2im.
-    """
-
-    def __init__(
-        self,
-        kernel_size: int | tuple[int, int],
-        stride: int | tuple[int, int] | None = None,
-        padding: int | tuple[int, int] = 0,
-        dilation: int | tuple[int, int] = 1,
-        name: str | None = None,
-    ):
-        super().__init__()
-
-        # Normalize kernel size
-        if isinstance(kernel_size, int):
-            self.k_h = self.k_w = kernel_size
-        else:
-            self.k_h, self.k_w = kernel_size
-
-        # Normalize stride (default to kernel_size if None)
-        if stride is None:
-            self.s_h = self.k_h
-            self.s_w = self.k_w
-        elif isinstance(stride, int):
-            self.s_h = self.s_w = stride
-        else:
-            self.s_h, self.s_w = stride
-
-        # Normalize padding
-        if isinstance(padding, int):
-            self.p_h = self.p_w = padding
-        else:
-            self.p_h, self.p_w = padding
-
-        # Normalize dilation
-        if isinstance(dilation, int):
-            self.d_h = self.d_w = dilation
-        else:
-            self.d_h, self.d_w = dilation
-
-        self.name = name or (
-            f"ScorchMaxPool2dFast(kernel=({self.k_h},{self.k_w}), "
-            f"stride=({self.s_h},{self.s_w}), "
-            f"padding=({self.p_h},{self.p_w}), "
-            f"dilation=({self.d_h},{self.d_w}))"
-        )
-
-        # Cache for backward
-        self._last_input_shape = None    # (N, C, H, W)
-        self._H_out = None
-        self._W_out = None
-        self._argmax = None              # (N, C, H_out*W_out), indices in [0, K)
-        self._input_was_3d = False       # True if original input was (C,H,W)
-
-    # ----------------------------------------------------------
-    # Forward
-    # ----------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray, shape (N, C, H, W) or (C, H, W)
-        returns: np.ndarray, shape (N, C, H_out, W_out) or (C, H_out, W_out)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        # Accept 3D (C,H,W) by promoting to batch size 1
-        if x_arr.ndim == 3:
-            self._input_was_3d = True
-            x_arr = x_arr[np.newaxis, ...]  # (1, C, H, W)
-        elif x_arr.ndim == 4:
-            self._input_was_3d = False
-        else:
-            raise ValueError(
-                f"{self.name}: Expected 3D or 4D input, got shape {x_arr.shape}"
-            )
-
-        N, C, H, W = x_arr.shape
-
-        # Compute output dims (same formula as conv)
-        H_out = ((H + 2 * self.p_h - self.d_h * (self.k_h - 1) - 1)
-                 // self.s_h + 1)
-        W_out = ((W + 2 * self.p_w - self.d_w * (self.k_w - 1) - 1)
-                 // self.s_w + 1)
-
-        if H_out <= 0 or W_out <= 0:
-            raise ValueError(
-                f"{self.name}: Non-positive output size "
-                f"H_out={H_out}, W_out={W_out} for input (H={H},W={W})"
-            )
-
-        # im2col for pooling (pads with -inf)
-        cols = im2col_maxpool(
-            x_arr,
-            self.k_h, self.k_w,
-            self.s_h, self.s_w,
-            self.p_h, self.p_w,
-            self.d_h, self.d_w,
-        )  # (N, C*k_h*k_w, H_out*W_out)
-
-        K = self.k_h * self.k_w
-        P = H_out * W_out
-
-        # Reshape to: (N, C, K, P)
-        cols_reshaped = cols.reshape(N, C, K, P)
-
-        # Max over kernel dimension K
-        max_vals = cols_reshaped.max(axis=2)                          # (N, C, P)
-        argmax_idx = cols_reshaped.argmax(axis=2).astype(np.int32)    # (N, C, P)
-
-        # Reshape back to (N, C, H_out, W_out)
-        y = max_vals.reshape(N, C, H_out, W_out)
-
-        # Cache for backward
-        self._last_input_shape = (N, C, H, W)
-        self._H_out = H_out
-        self._W_out = W_out
-        self._argmax = argmax_idx
-
-        if self._input_was_3d:
-            # Return (C, H_out, W_out)
-            return y[0]
-        else:
-            return y
-
-    # ----------------------------------------------------------
-    # Backward
-    # ----------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output:
-            dL/dy, shape (N, C, H_out, W_out) or (C, H_out, W_out)
-
-        Returns:
-            dL/dx, shape (N, C, H, W) or (C, H, W)
-        """
-        if (
-            self._last_input_shape is None
-            or self._argmax is None
-            or self._H_out is None
-            or self._W_out is None
-        ):
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        N, C, H, W = self._last_input_shape
-        H_out = self._H_out
-        W_out = self._W_out
-        P = H_out * W_out
-        K = self.k_h * self.k_w
-
-        g_out = np.asarray(grad_output, dtype=np.float32)
-
-        # Normalize grad_output to 4D
-        if self._input_was_3d:
-            if g_out.ndim != 3:
-                raise ValueError(
-                    f"{self.name}: grad_output for 3D input must be 3D "
-                    f"(C,H_out,W_out), got {g_out.shape}"
-                )
-            if g_out.shape != (C, H_out, W_out):
-                raise ValueError(
-                    f"{self.name}: grad_output shape {g_out.shape} does not match "
-                    f"(C,H_out,W_out)=({C},{H_out},{W_out})"
-                )
-            g_out = g_out[np.newaxis, ...]  # (1, C, H_out, W_out)
-        else:
-            if g_out.ndim != 4:
-                raise ValueError(
-                    f"{self.name}: grad_output for 4D input must be 4D "
-                    f"(N,C,H_out,W_out), got {g_out.shape}"
-                )
-            if g_out.shape != (N, C, H_out, W_out):
-                raise ValueError(
-                    f"{self.name}: grad_output shape {g_out.shape} does not match "
-                    f"(N,C,H_out,W_out)=({N},{C},{H_out},{W_out})"
-                )
-
-        # Flatten grad_output to (N, C, P)
-        g_out_flat = g_out.reshape(N, C, P)   # (N, C, P)
-        argmax = self._argmax                 # (N, C, P)
-
-        # Build grad_cols of shape (N, C*K, P)
-        grad_cols = np.zeros((N, C * K, P), dtype=np.float32)
-
-        # For each (n,c,p), route g_out_flat[n,c,p] to
-        # grad_cols[n, c*K + argmax[n,c,p], p]
-        for n in range(N):
-            for c in range(C):
-                for p in range(P):
-                    k_idx = argmax[n, c, p]
-                    go = g_out_flat[n, c, p]
-                    grad_cols[n, c * K + k_idx, p] += go
-
-        # Convert column gradients back to image-space gradients
-        grad_x = col2im(
-            grad_cols,
-            (N, C, H, W),
-            self.k_h, self.k_w,
-            self.s_h, self.s_w,
-            self.p_h, self.p_w,
-            self.d_h, self.d_w,
-        )
-
-        if self._input_was_3d:
-            # Return (C, H, W)
-            return grad_x[0]
-        else:
-            return grad_x
-
-    # ----------------------------------------------------------
-    # Parameters / grads
-    # ----------------------------------------------------------
-    def parameters(self):
-        # No learnable parameters
-        return []
-
-    def zero_grad(self):
-        # No parameter gradients to reset
-        pass
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_module.py =====
-
-# scorch/scorch_module.py
-from __future__ import annotations
-
-from typing import List, Any
-
-
-class ScorchModule:
-    """
-    Minimal base class for all Scorch layers.
-
-    Design goals:
-      - Very small surface area.
-      - Forward and backward are explicit.
-      - Parameter handling is unified (so optimizers can just call .parameters()).
-
-    Subclasses should override:
-      - forward(self, x)
-      - backward(self, grad_output)
-      - parameters(self)         (if they have learnable params)
-      - zero_grad(self)          (if they store gradients)
-    """
-
-    def forward(self, x: Any) -> Any:
-        """
-        Compute the forward pass.
-
-        Must be overridden in subclasses.
-
-        Example signature in subclasses:
-            x: np.ndarray
-            returns: np.ndarray
-
-        Forward = compute values
-        Backward = compute sensitivities
-        """
-        raise NotImplementedError(f"{self.__class__.__name__}.forward not implemented.")
-
-    def backward(self, grad_output: Any) -> Any:
-        """
-        Compute the backward pass.
-
-        grad_output is dL/d(out) from the next layer.
-        This method must compute dL/d(input) and store
-        gradients for parameters (if any).
-
-        Chain Rule:
-        (dL / dx) = (dL / dy) * (dy / dx)
-
-        (The gradient leaving a node) =
-        (The gradient entering that node) *
-        (the derivative of the operation the node performs)
-
-        Forward = compute values
-        Backward = compute sensitivities
-        """
-        raise NotImplementedError(f"{self.__class__.__name__}.backward not implemented.")
-
-    # --------------------------------------------------
-    # Parameter handling
-    # --------------------------------------------------
-    def parameters(self) -> List[Any]:
-        """
-        Return a flat list of all learnable parameters
-        owned by this module.
-
-        Layers without parameters can just inherit this
-        default (empty list).
-        """
-        return []
-
-    def zero_grad(self) -> None:
-        """
-        Reset gradients for all learnable parameters.
-
-        Layers without parameters (e.g. ReLU, MaxPool)
-        can inherit this default no-op implementation.
-        Layers with parameters should override and zero
-        their internal grad arrays.
-        """
-        # No-op by default
-        pass
-
-    # --------------------------------------------------
-    # Convenience: allow calling module(x) like in PyTorch
-    # --------------------------------------------------
-    def __call__(self, x: Any) -> Any:
-        return self.forward(x)
-
-    def __repr__(self) -> str:
-        return f"{self.__class__.__name__}()"
-
-
-
-# ===== scorch_optimizer.py =====
-
-# scorch_optimizer.py
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Iterable, List
-import numpy as np
-
-
-@dataclass
-class TorchParam:
-    """
-    Minimal 'parameter' wrapper for Scorch-style tensors.
-
-    data: np.ndarray holding the actual weights.
-    grad: np.ndarray of the same shape, filled by your backward pass.
-    """
-    data: np.ndarray
-    grad: np.ndarray | None = None
-
-
-class ScorchOptimizer:
-    """
-    Minimal PyTorch-style optimizer base class.
-
-    - Holds a flat list of TorchParam objects (or anything with .data / .grad).
-    - Provides zero_grad().
-    - Child classes implement step().
-    """
-
-    def __init__(self, params: Iterable[TorchParam], lr: float = 1e-3) -> None:
-        self.params: List[TorchParam] = list(params)
-        if len(self.params) == 0:
-            raise ValueError("ScorchOptimizer got an empty parameter list.")
-        self.lr: float = float(lr)
-
-    def zero_grad(self) -> None:
-        """
-        Set all gradients to zero (in-place), if they exist.
-        """
-        for p in self.params:
-            if p.grad is not None:
-                p.grad[...] = 0.0
-
-    def step(self) -> None:
-        """
-        Perform a single optimization step.
-
-        Must be overridden by subclasses.
-        """
-        raise NotImplementedError("ScorchOptimizer.step() must be implemented by subclasses.")
-
-
-
-# ===== scorch_reduction.py =====
-
-# scorch/scorch_reduction.py
-from __future__ import annotations
-from enum import Enum
-
-
-class ScorchReduction(str, Enum):
-    """
-    Enum representing how a loss should be reduced.
-
-    - NONE  => return per-sample losses, shape (N,)
-    - MEAN  => return a single scalar (average)
-    - SUM   => return a single scalar (sum)
-
-    Matches PyTorch's Reduction enum in spirit.
-    """
-
-    NONE = "none"
-    MEAN = "mean"
-    SUM = "sum"
-
-    @staticmethod
-    def from_value(val: str | ScorchReduction) -> ScorchReduction:
-        """
-        Accepts either:
-            - a ScorchReduction enum value
-            - or a string ("none", "mean", "sum")
-
-        Converts and returns a ScorchReduction.
-        """
-        if isinstance(val, ScorchReduction):
-            return val
-
-        if isinstance(val, str):
-            val_lower = val.lower()
-            for r in ScorchReduction:
-                if r.value == val_lower:
-                    return r
-
-        raise ValueError(
-            f"Invalid reduction: {val!r}. "
-            f"Expected one of: {[r.value for r in ScorchReduction]}"
-        )
-
-
-
-# ===== scorch_relu.py =====
-
-# scorch/scorch_relu.py
-from __future__ import annotations
-
-import numpy as np
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchReLU(ScorchModule):
-    """
-    Elementwise ReLU activation:
-
-        y = max(0, x)
-
-    Forward:
-        - Works on any np.ndarray shape.
-        - Stores a mask (x > 0) for backward.
-
-    Backward:
-        - grad_input = grad_output * (x > 0)
-    """
-
-    def __init__(self, name: str | None = None):
-        super().__init__()
-        self.name = name or "ScorchReLU"
-        self._mask: np.ndarray | None = None
-
-    # ------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray (any shape)
-        returns: np.ndarray (same shape)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        # Store mask for backward: 1 where x > 0, 0 elsewhere
-        self._mask = (x_arr > 0).astype(np.float32)
-
-        # ReLU: max(0, x) == x * (x > 0)
-        return x_arr * self._mask
-
-    # ------------------------------------------------------
-    # Backward pass
-    # ------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output: dL/dy, same shape as forward output
-        returns: dL/dx, same shape as input
-
-        For ReLU:
-            dL/dx = dL/dy * 1 where x > 0
-            dL/dx = dL/dy * 0 where x <= 0
-        """
-        if self._mask is None:
-            raise RuntimeError(f"{self.name}: backward called before forward.")
-
-        grad_out_arr = np.asarray(grad_output, dtype=np.float32)
-
-        if grad_out_arr.shape != self._mask.shape:
-            raise ValueError(
-                f"{self.name}: grad_output shape {grad_out_arr.shape} "
-                f"does not match mask shape {self._mask.shape}"
-            )
-
-        # Elementwise multiply with mask
-        grad_input = grad_out_arr * self._mask
-        return grad_input
-
-    # ------------------------------------------------------
-    # Parameters / grads
-    # ------------------------------------------------------
-    def parameters(self):
-        # ReLU has no learnable parameters
-        return []
-
-    def zero_grad(self):
-        # Nothing to do; no parameters
-        pass
-
-    def __repr__(self):
-        return f"{self.name}()"
-
-
-
-# ===== scorch_sequential.py =====
-
-# scorch/scorch_sequential.py
-from __future__ import annotations
-
+from typing import TYPE_CHECKING
 from typing import List
-
-from scorch.scorch_module import ScorchModule
-
-
-class ScorchSequential(ScorchModule):
-    """
-    A simple container that holds several ScorchModules and applies them in order.
-
-    Forward pass:
-        input → layer_0 → layer_1 → ... → layer_N → output
-
-    Backward pass:
-        final gradient → layer_N.backward → ... → layer_1.backward → layer_0.backward
-
-    Parameters:
-        Returns all parameters belonging to all child layers.
-
-    zero_grad():
-        Clears all stored gradients in every child layer.
-    """
-
-    def __init__(self, *layers: ScorchModule):
-        """
-        Example:
-            model = ScorchSequential(
-                ScorchLinear(4, 8),
-                ScorchReLU(),
-                ScorchLinear(8, 3)
-            )
-        """
-        super().__init__()
-        self.layers: List[ScorchModule] = list(layers)
-
-    # ------------------------------------------------------
-    # Forward pass
-    # ------------------------------------------------------
-    def forward(self, x):
-        """
-        Pass the input through each layer in order.
-
-        x: whatever shape the first layer expects (often a 1-D np.ndarray)
-        returns: output of the final layer
-        """
-        out = x
-        for layer in self.layers:
-            out = layer.forward(out)
-        return out
-
-    # ------------------------------------------------------
-    # Backward pass
-    # ------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        Backpropagate a gradient through all layers in reverse order.
-
-        grad_output:
-            The gradient of the loss with respect to the output of
-            the last layer. (Often called "dL/dy_last")
-
-        Returns:
-            The gradient of the loss with respect to the original input.
-            (Often called "dL/dx_first")
-        """
-        grad = grad_output
-
-        # Traverse layers in reverse order (just like PyTorch)
-        for layer in reversed(self.layers):
-            grad = layer.backward(grad)
-
-        return grad
-
-    # ------------------------------------------------------
-    # Parameter management
-    # ------------------------------------------------------
-    def parameters(self):
-        """
-        Collect parameters from every child layer into a single flat list.
-        """
-        params = []
-        for layer in self.layers:
-            params.extend(layer.parameters())
-        return params
-
-    def zero_grad(self):
-        """
-        Reset gradient buffers for all child layers.
-        """
-        for layer in self.layers:
-            layer.zero_grad()
-
-    # ------------------------------------------------------
-    # Convenience
-    # ------------------------------------------------------
-    def append(self, layer: ScorchModule):
-        """Add a layer to the end."""
-        self.layers.append(layer)
-
-    def __len__(self):
-        return len(self.layers)
-
-    def __getitem__(self, idx: int):
-        return self.layers[idx]
-
-    def __repr__(self):
-        inner = ",\n  ".join(repr(layer) for layer in self.layers)
-        return f"ScorchSequential(\n  {inner}\n)"
-
-
-
-# ===== scorch_small_convnet_multitask.py =====
-
-# scorch/scorch_small_convnet_multitask.py
-from __future__ import annotations
-
 import numpy as np
-
-from scorch.scorch_module import ScorchModule
-from scorch.scorch_sequential import ScorchSequential
-from scorch.scorch_conv2d_fast import ScorchConv2dFast
-from scorch.scorch_max_pool2d_fast import ScorchMaxPool2dFast
-from scorch.scorch_relu import ScorchReLU
-from scorch.scorch_linear import ScorchLinear
-from scorch.scorch_adaptive_avg_pool2d import ScorchAdaptiveAvgPool2d
-
-
-class ScorchSmallConvNetMultiTask(ScorchModule):
-    """
-    Tiny CNN that:
-      - Produces class logits (for patch classification).
-      - Produces a per-pixel mask (for segmentation).
-
-    Architecture mirrors the PyTorch reference:
-
-        features:
-            Conv2d(in_channels, 8,  kernel_size=3, padding=1)
-            ReLU
-            MaxPool2d(2)
-            Conv2d(8, 16, kernel_size=3, padding=1)
-            ReLU
-            MaxPool2d(2)
-
-        classifier:
-            AdaptiveAvgPool2d((1,1))
-            Flatten (N,16,1,1) -> (N,16)
-            Linear(16, 64)
-            ReLU
-            Linear(64, num_classes)
-
-        seg_head:
-            Conv2d(16, 16, kernel_size=3, padding=1)
-            ReLU
-            Conv2d(16, 1,  kernel_size=1)
-
-    Forward(x):
-        - x: np.ndarray, shape (N, in_channels, H, W)
-        Returns:
-        - class_logits: (N, num_classes)
-        - seg_logits:   (N, 1, Hf, Wf) where Hf,Wf are features' spatial dims
-
-    Backward expects a tuple:
-        backward((grad_class_logits, grad_seg_logits)).
-
-    Returns:
-        grad_input: dL/dx, shape (N, in_channels, H, W)
-    """
-
-    def __init__(self, in_channels: int, num_classes: int, name: str | None = None):
-        super().__init__()
-        self.in_channels = int(in_channels)
-        self.num_classes = int(num_classes)
-        self.name = name or f"ScorchSmallConvNetMultiTask(in={in_channels}, classes={num_classes})"
-
-        # --------------------------------------------------
-        # Shared feature extractor
-        # --------------------------------------------------
-        self.features = ScorchSequential(
-            ScorchConv2dFast(
-                in_channels=self.in_channels,
-                out_channels=8,
-                kernel_size=3,
-                padding=1,
-                name="conv1",
-            ),
-            ScorchReLU(name="relu1"),
-            ScorchMaxPool2dFast(kernel_size=2, stride=2, name="pool1"),
-
-            ScorchConv2dFast(
-                in_channels=8,
-                out_channels=16,
-                kernel_size=3,
-                padding=1,
-                name="conv2",
-            ),
-            ScorchReLU(name="relu2"),
-            ScorchMaxPool2dFast(kernel_size=2, stride=2, name="pool2"),
-        )
-
-        # --------------------------------------------------
-        # Classification head
-        #   feats -> AdaptiveAvgPool2d(1,1) -> Flatten -> FC(16->64) -> ReLU -> FC(64->num_classes)
-        # --------------------------------------------------
-        self.pool = ScorchAdaptiveAvgPool2d(output_size=(1, 1), name="global_avg_pool")
-
-        # 16 channels after conv2
-        self.classifier = ScorchSequential(
-            ScorchLinear(16, 64, name="cls_fc1"),
-            ScorchReLU(name="cls_relu"),
-            ScorchLinear(64, self.num_classes, name="cls_fc2"),
-        )
-
-        # We'll need to remember the pooled shape for reshaping in backward
-        self._last_pooled_shape = None  # (N, 16, 1, 1)
-
-        # --------------------------------------------------
-        # Segmentation head
-        #   feats -> Conv(16->16, k3,p1) -> ReLU -> Conv(16->1, k1)
-        # --------------------------------------------------
-        self.seg_head = ScorchSequential(
-            ScorchConv2dFast(
-                in_channels=16,
-                out_channels=16,
-                kernel_size=3,
-                padding=1,
-                name="seg_conv1",
-            ),
-            ScorchReLU(name="seg_relu"),
-            ScorchConv2dFast(
-                in_channels=16,
-                out_channels=1,
-                kernel_size=1,
-                padding=0,
-                name="seg_conv2",
-            ),
-        )
-
-        # Cache last feature map for backward sanity/debug if needed
-        self._last_feats_shape = None  # (N,16,Hf,Wf)
-
-    # ------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------
-    def forward(self, x):
-        """
-        x: np.ndarray, shape (N, in_channels, H, W)
-
-        returns:
-            class_logits: (N, num_classes)
-            seg_logits:   (N, 1, Hf, Wf)
-        """
-        x_arr = np.asarray(x, dtype=np.float32)
-
-        if x_arr.ndim != 4:
-            raise ValueError(
-                f"{self.name}: Expected 4D input (N,C,H,W), got {x_arr.shape}"
-            )
-
-        # Shared features
-        feats = self.features.forward(x_arr)  # (N,16,Hf,Wf)
-        self._last_feats_shape = feats.shape
-
-        N, C_feat, Hf, Wf = feats.shape
-        if C_feat != 16:
-            raise ValueError(
-                f"{self.name}: Expected features to have 16 channels, got {C_feat}"
-            )
-
-        # --------------------------------------------------
-        # Classification branch
-        # --------------------------------------------------
-        pooled = self.pool.forward(feats)  # (N,16,1,1)
-        self._last_pooled_shape = pooled.shape
-
-        # Flatten: (N,16,1,1) -> (N,16)
-        pooled_flat = pooled.reshape(N, C_feat)
-
-        class_logits = self.classifier.forward(pooled_flat)  # (N,num_classes)
-
-        # --------------------------------------------------
-        # Segmentation branch
-        # --------------------------------------------------
-        seg_logits = self.seg_head.forward(feats)  # (N,1,Hf,Wf)
-
-        return class_logits, seg_logits
-
-    # ------------------------------------------------------
-    # Backward
-    # ------------------------------------------------------
-    def backward(self, grad_output):
-        """
-        grad_output: tuple (grad_class_logits, grad_seg_logits):
-
-            grad_class_logits: shape (N, num_classes)
-            grad_seg_logits:   shape (N, 1, Hf, Wf)
-
-        returns:
-            grad_input: shape (N, in_channels, H, W)
-        """
-        if not isinstance(grad_output, (tuple, list)) or len(grad_output) != 2:
-            raise ValueError(
-                f"{self.name}.backward expects (grad_class_logits, grad_seg_logits) tuple, "
-                f"got {type(grad_output)}"
-            )
-
-        grad_class_logits, grad_seg_logits = grad_output
-
-        if self._last_feats_shape is None or self._last_pooled_shape is None:
-            raise RuntimeError(
-                f"{self.name}: backward called before forward (missing caches)."
-            )
-
-        N, C_feat, Hf, Wf = self._last_feats_shape
-        pooled_shape = self._last_pooled_shape  # (N,16,1,1)
-
-        grad_class = np.asarray(grad_class_logits, dtype=np.float32)
-        grad_seg = np.asarray(grad_seg_logits, dtype=np.float32)
-
-        # --------------------------------------------------
-        # Classification branch backward
-        # --------------------------------------------------
-        # classifier: Linear(16->64) -> ReLU -> Linear(64->num_classes)
-        # forward got pooled_flat (N,16)
-        grad_pooled_flat = self.classifier.backward(grad_class)  # (N,16)
-
-        # Unflatten back to pooled shape (N,16,1,1)
-        grad_pooled = grad_pooled_flat.reshape(pooled_shape)
-
-        # Back through AdaptiveAvgPool2d
-        grad_feats_from_cls = self.pool.backward(grad_pooled)  # (N,16,Hf,Wf)
-
-        # --------------------------------------------------
-        # Segmentation branch backward
-        # --------------------------------------------------
-        grad_feats_from_seg = self.seg_head.backward(grad_seg)  # (N,16,Hf,Wf)
-
-        # --------------------------------------------------
-        # Combine gradients from both branches
-        # --------------------------------------------------
-        grad_feats_total = grad_feats_from_cls + grad_feats_from_seg  # (N,16,Hf,Wf)
-
-        # Back through shared features
-        grad_input = self.features.backward(grad_feats_total)  # (N,in_channels,H,W)
-
-        return grad_input
-
-    # ------------------------------------------------------
-    # Parameter handling
-    # ------------------------------------------------------
-    def parameters(self):
-        params = []
-        params.extend(self.features.parameters())
-        params.extend(self.classifier.parameters())
-        params.extend(self.seg_head.parameters())
-        return params
-
-    def zero_grad(self):
-        self.features.zero_grad()
-        self.classifier.zero_grad()
-        self.seg_head.zero_grad()
-
-    def __repr__(self):
-        return self.name
-
-
-
-# ===== scorch_tensor.py =====
-
-# scorch/scorch_tensor.py
-
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional
-import numpy as np
-from image.bitmap import Bitmap
+from PIL import Image
 from image.rgba import RGBA
+from image.convolution_edge_behavior import ConvolutionEdgeBehavior
+from typing import Optional
+import torch
+import torch.nn.functional as F
 
-@dataclass
-class ScorchTensor:
+# ----------------------------------------------------------------------
+# Bitmap: rgba[x][y] with OpenCV + Pillow interop
+# ----------------------------------------------------------------------
+
+class Bitmap:
     """
-    Core numeric tensor type for Scorch.
-
-    Internal Rules:
-    - ALWAYS normalized float32 in range [0, 1].
-    - ALWAYS channel-first: (C, H, W).
-    - C is 1 (grayscale) or 3 (RGB).
+    Bitmap with:
+        - width, height
+        - pixels stored as rgba[x][y] where:
+            x = 0..width-1  (left to right)
+            y = 0..height-1 (top to bottom)
     """
 
-    data: np.ndarray                  # MUST be float32 (C,H,W) normalized
-    name: Optional[str] = None
-    role: str = "generic"             # "image", "mask", etc.
+    def __init__(self, width: int = 0, height: int = 0) -> None:
+        self.width: int = 0
+        self.height: int = 0
+        self.rgba: List[List[RGBA]] = []  # rgba[x][y]
+        if width > 0 and height > 0:
+            self.allocate(width, height)
 
-    # ===============================================================
-    # Bitmap → ScorchTensor
-    # ===============================================================
-    @classmethod
-    def from_bitmap(
-        cls,
-        bmp: Bitmap,
-        name: Optional[str] = None,
-        role: str = "image",
-        grayscale: bool = True,
-    ) -> "ScorchTensor":
+    # --------------------------------------------------
+    # The ONLY place we allocate the internal rgba array
+    # --------------------------------------------------
+    def allocate(self, width: int, height: int) -> None:
         """
-        Convert a Bitmap to a ScorchTensor, ALWAYS normalized to [0,1].
+        Resize the bitmap and allocate internal storage.
+        This is the ONLY place rgba[][] is allocated.
         """
-        if bmp.width <= 0 or bmp.height <= 0:
-            return cls(np.zeros((0,), dtype=np.float32), name=name, role=role)
+        self.width = int(width)
+        self.height = int(height)
 
-        # BGRA uint8 → (H, W, 4)
-        bgra = bmp.export_opencv().astype(np.float32)
+        # rgba[x][y]
+        self.rgba = [
+            [RGBA(0, 0, 0, 255) for _y in range(self.height)]
+            for _x in range(self.width)
+        ]
 
-        # Extract channels
-        b = bgra[:, :, 0]
-        g = bgra[:, :, 1]
-        r = bgra[:, :, 2]
+    # --------------------------------------------------
+    # Expansion / copy
+    # --------------------------------------------------
+    def expand(self, width: int, height: int) -> None:
+        """
+        Expand this bitmap to at least (width, height).
 
-        if grayscale:
-            gray = RGBA.to_gray(r, g, b)     # H,W
-            gray /= 255.0                                # normalize
-            data = gray[np.newaxis, :, :]                # C=1,H,W
-        else:
-            r /= 255.0
-            g /= 255.0
-            b /= 255.0
-            data = np.stack([r, g, b], axis=0)           # C=3,H,W
+        Existing pixels are preserved in the top-left corner.
+        Newly exposed pixels are filled with opaque black (0,0,0,255).
 
-        return cls(data=data.astype(np.float32), name=name, role=role)
+        If the requested size is smaller than or equal to the current
+        size in both dimensions, this is a no-op (no shrinking).
+        """
+        new_w = int(width)
+        new_h = int(height)
+
+        if new_w <= self.width and new_h <= self.height:
+            # Nothing to do; we only expand, never shrink.
+            return
+
+        old_w = self.width
+        old_h = self.height
+        old_rgba = self.rgba
+
+        # Allocate new storage
+        new_rgba = [
+            [RGBA(0, 0, 0, 255) for _y in range(new_h)]
+            for _x in range(new_w)
+        ]
+
+        copy_w = min(old_w, new_w)
+        copy_h = min(old_h, new_h)
+
+        # Copy old pixels into the new buffer (top-left aligned)
+        for x in range(copy_w):
+            src_col = old_rgba[x]
+            dst_col = new_rgba[x]
+            for y in range(copy_h):
+                src_px = src_col[y]
+                dst_px = dst_col[y]
+                dst_px.ri = src_px.ri
+                dst_px.gi = src_px.gi
+                dst_px.bi = src_px.bi
+                dst_px.ai = src_px.ai
+
+        # Swap in the new buffer
+        self.width = new_w
+        self.height = new_h
+        self.rgba = new_rgba
+
+    def copy(self) -> "Bitmap":
+        """
+        Deep copy this bitmap into a new Bitmap instance.
+        Pixels are duplicated (no shared RGBA objects).
+        """
+        result = Bitmap()
+        result.allocate(self.width, self.height)
+        new_rgba = result.rgba
+
+        for x in range(self.width):
+            src_col = self.rgba[x]
+            dst_col = new_rgba[x]
+            for y in range(self.height):
+                src_px = src_col[y]
+                dst_px = dst_col[y]
+                dst_px.ri = src_px.ri
+                dst_px.gi = src_px.gi
+                dst_px.bi = src_px.bi
+                dst_px.ai = src_px.ai
+
+        return result
+
+    # --------------------------------------------------
+    # Loading Methods: load via FileIO + import_pillow
+    # --------------------------------------------------
     
     @classmethod
-    def from_bitmap_crop(
+    def with_image(cls, file_path) -> "Bitmap":
+        """
+        Convenience constructor: create a Bitmap and load an image from
+        an explicit file path via FileIO.load_image.
+        """
+        bmp = cls()
+        bmp.load_image(file_path)
+        return bmp
+    
+    @classmethod
+    def with_local_image(
         cls,
-        bmp: Bitmap,
+        subdirectory: str | None = None,
+        name: str | None = None,
+        extension: str | None = None,
+    ) -> "Bitmap":
+        """
+        Convenience constructor: create a Bitmap and load an image using
+        FileIO.load_local_image (which uses FileIO.local for path building).
+        """
+        bmp = cls()
+        bmp.load_local_image(
+            subdirectory=subdirectory,
+            name=name,
+            extension=extension,
+        )
+        return bmp
+
+    def load_image(self, file_path):
+        """
+        Create a Bitmap from an explicit file path using FileIO.load_image.
+        """
+        from filesystem.file_utils import FileUtils
+        image = FileUtils.load_image(file_path)
+        self.import_pillow(image)
+        return self  # optional, enables chaining
+
+    def load_local_image(
+        self,
+        subdirectory: str | None = None,
+        name: str | None = None,
+        extension: str | None = None,
+    ) -> "Bitmap":
+        """
+        Create a Bitmap using FileIO.load_local_image
+        (which uses FileIO.local for path building).
+        """
+        from filesystem.file_utils import FileUtils
+        image = FileUtils.load_local_image(
+            subdirectory=subdirectory,
+            name=name,
+            extension=extension,
+        )
+        self.import_pillow(image)
+        return self  # optional, enables chaining
+
+    # --------------------------------------------------
+    # Import from OpenCV (NumPy array)
+    # --------------------------------------------------
+    def import_opencv(self, mat: np.ndarray) -> None:
+        """
+        Import from an OpenCV-style NumPy array.
+        Supports:
+            - H x W (grayscale)
+            - H x W x 3 (BGR)
+            - H x W x 4 (BGRA)
+        """
+        if mat is None:
+            raise ValueError("mat is None")
+
+        if mat.ndim == 2:
+            # Grayscale: shape = (H, W)
+            h, w = mat.shape
+            self.allocate(w, h)
+            for y in range(h):
+                for x in range(w):
+                    v = int(mat[y, x])
+                    self.rgba[x][y] = RGBA(v, v, v, 255)
+
+        elif mat.ndim == 3:
+            h, w, c = mat.shape
+            if c not in (3, 4):
+                raise ValueError(f"Unsupported channel count: {c}")
+
+            self.allocate(w, h)
+
+            if c == 3:
+                # BGR
+                for y in range(h):
+                    for x in range(w):
+                        b, g, r = mat[y, x]
+                        self.rgba[x][y] = RGBA(int(r), int(g), int(b), 255)
+            elif c == 4:
+                # BGRA
+                for y in range(h):
+                    for x in range(w):
+                        b, g, r, a = mat[y, x]
+                        self.rgba[x][y] = RGBA(int(r), int(g), int(b), int(a))
+
+        else:
+            raise ValueError(f"Unsupported mat.ndim = {mat.ndim}")
+
+    # --------------------------------------------------
+    # Import from Pillow Image
+    # --------------------------------------------------
+    def import_pillow(self, image: Image.Image) -> None:
+        """
+        Import from a Pillow Image.
+        Converts to RGBA first to simplify handling.
+        """
+        if image is None:
+            raise ValueError("image is None")
+
+        img = image.convert("RGBA")
+        w, h = img.size
+        self.allocate(w, h)
+
+        pixels = img.load()
+        for x in range(w):
+            for y in range(h):
+                r, g, b, a = pixels[x, y]
+                self.rgba[x][y] = RGBA(int(r), int(g), int(b), int(a))
+
+    # --------------------------------------------------
+    # Export to OpenCV (NumPy array)
+    # --------------------------------------------------
+    def export_opencv(self) -> np.ndarray:
+        """
+        Export to an OpenCV-style NumPy array (H x W x 4, BGRA).
+        Caller can convert to BGR if desired:
+            bgr = bgra[:, :, :3]
+        """
+        h = self.height
+        w = self.width
+        mat = np.zeros((h, w, 4), dtype=np.uint8)
+
+        for x in range(w):
+            for y in range(h):
+                px = self.rgba[x][y]
+                # OpenCV expects B, G, R, A
+                mat[y, x, 0] = px.bi
+                mat[y, x, 1] = px.gi
+                mat[y, x, 2] = px.ri
+                mat[y, x, 3] = px.ai
+
+        return mat
+
+    # --------------------------------------------------
+    # Export to Pillow Image
+    # --------------------------------------------------
+    def export_pillow(self) -> Image.Image:
+        """
+        Export to a Pillow RGBA Image.
+        """
+        img = Image.new("RGBA", (self.width, self.height))
+        pixels = img.load()
+
+        for x in range(self.width):
+            for y in range(self.height):
+                px = self.rgba[x][y]
+                pixels[x, y] = (px.ri, px.gi, px.bi, px.ai)
+
+        return img
+
+    # --------------------------------------------------
+    # Flood fill: set every pixel to the same RGBA color
+    # --------------------------------------------------
+    def flood(self, color: RGBA) -> None:
+        """
+        Set every pixel in this bitmap to the given RGBA color.
+
+        If the bitmap has zero width or height, this is a no-op.
+        """
+        if self.width <= 0 or self.height <= 0:
+            return
+
+        # Use the int components from the input color.
+        r = color.ri
+        g = color.gi
+        b = color.bi
+        a = color.ai
+
+        for x in range(self.width):
+            col = self.rgba[x]
+            for y in range(self.height):
+                px = col[y]
+                px.ri = r
+                px.gi = g
+                px.bi = b
+                px.ai = a
+
+    # --------------------------------------------------
+    # Internal helper: compute overlap for stamping
+    # --------------------------------------------------
+    def _compute_stamp_bounds(self, glyph: "Bitmap", x: int, y: int):
+        """
+        Compute the overlapping region between this bitmap (destination)
+        and the glyph bitmap (source), given that the glyph's top-left
+        should be placed at (x, y) in destination coordinates.
+
+        Returns:
+            (start_dx, end_dx, start_dy, end_dy, start_gx, start_gy)
+        or None if there is no overlap.
+        """
+        gw, gh = glyph.width, glyph.height
+        dw, dh = self.width, self.height
+        if gw <= 0 or gh <= 0 or dw <= 0 or dh <= 0:
+            return None
+        start_dx = max(x, 0)
+        start_dy = max(y, 0)
+        end_dx = min(x + gw, dw)
+        end_dy = min(y + gh, dh)
+        if start_dx >= end_dx or start_dy >= end_dy:
+            return None
+        start_gx = start_dx - x
+        start_gy = start_dy - y
+        return (start_dx, end_dx, start_dy, end_dy, start_gx, start_gy)
+
+    # --------------------------------------------------
+    # Stamp: overwrite pixels from glyph into this bitmap
+    # --------------------------------------------------
+    def stamp(self, glyph: "Bitmap", x: int, y: int) -> None:
+        """
+        Stamp `glyph` onto this bitmap so that glyph (0,0)
+        lands at destination (x,y).
+
+        For now, we simply REPLACE the destination pixels with
+        the glyph pixels (no alpha blending).
+
+        All edge/off-grid cases are handled gracefully:
+        - If the stamp is fully off-screen, nothing happens.
+        - If the stamp is partially off-screen, only the visible
+            part is drawn.
+        """
+        bounds = self._compute_stamp_bounds(glyph, x, y)
+        if bounds is None:
+            return
+        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
+        for dy in range(start_dy, end_dy):
+            gy = start_gy + (dy - start_dy)
+            for dx in range(start_dx, end_dx):
+                gx = start_gx + (dx - start_dx)
+                self.rgba[dx][dy] = glyph.rgba[gx][gy]
+
+    # --------------------------------------------------
+    # Stamp with classic alpha
+    # --------------------------------------------------
+    def stamp_alpha(self, glyph: "Bitmap", x: int, y: int) -> None:
+        bounds = self._compute_stamp_bounds(glyph, x, y)
+        if bounds is None:
+            return
+        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
+        for dy in range(start_dy, end_dy):
+            gy = start_gy + (dy - start_dy)
+            for dx in range(start_dx, end_dx):
+                gx = start_gx + (dx - start_dx)
+                src_px = glyph.rgba[gx][gy]
+                dst_px = self.rgba[dx][dy]
+                self.rgba[dx][dy] = RGBA.blend_alpha(src_px, dst_px)
+                
+    # --------------------------------------------------
+    # Stamp with additive blending
+    # --------------------------------------------------
+    def stamp_additive(self, glyph: "Bitmap", x: int, y: int) -> None:
+        bounds = self._compute_stamp_bounds(glyph, x, y)
+        if bounds is None:
+            return
+        start_dx, end_dx, start_dy, end_dy, start_gx, start_gy = bounds
+        for dy in range(start_dy, end_dy):
+            gy = start_gy + (dy - start_dy)
+            for dx in range(start_dx, end_dx):
+                gx = start_gx + (dx - start_dx)
+                src_px = glyph.rgba[gx][gy]
+                dst_px = self.rgba[dx][dy]
+                self.rgba[dx][dy] = RGBA.blend_additive(src_px, dst_px)
+
+    # --------------------------------------------------
+    # Crop a sub-rectangle into a new Bitmap
+    # --------------------------------------------------
+    def crop(
+        self,
         x: int,
         y: int,
         width: int,
-        height: int,
-        name: Optional[str] = None,
-        role: str = "image",
-        grayscale: bool = True,
-    ) -> "ScorchTensor":
-        """
-        Crop region → Bitmap.crop → ScorchTensor.
-        Always normalized.
-        """
-        cropped = bmp.crop(
-            x=x,
-            y=y,
-            width=width,
-            height=height)
-        return cls.from_bitmap(cropped, name=name, role=role, grayscale=grayscale)
+        height: int) -> "Bitmap":
+        x = int(x)
+        y = int(y)
+        width = int(width)
+        height = int(height)
+        if width <= 0 or height <= 0 or self.width <= 0 or self.height <= 0:
+            return Bitmap()
+        gw, gh = self.width, self.height
+        dw, dh = width, height
+        x_offset = -x
+        y_offset = -y
+        start_dx = max(x_offset, 0)
+        start_dy = max(y_offset, 0)
+        end_dx = min(x_offset + gw, dw)
+        end_dy = min(y_offset + gh, dh)
+        if start_dx >= end_dx or start_dy >= end_dy:
+            return Bitmap()
+        start_gx = start_dx - x_offset
+        start_gy = start_dy - y_offset
+        crop_w = end_dx - start_dx
+        crop_h = end_dy - start_dy
+        result = Bitmap(crop_w, crop_h)
+        for dy in range(crop_h):
+            sy = start_gy + dy
+            for dx in range(crop_w):
+                sx = start_gx + dx
+                result.rgba[dx][dy] = self.rgba[sx][sy]
+        return result
     
-
-    # ===============================================================
-    # Init hook
-    # ===============================================================
-    def __post_init__(self) -> None:
-        # Force float32
-        arr = np.asarray(self.data, dtype=np.float32)
-
-        # Enforce normalization (final safety clamp)
-        arr = np.clip(arr, 0.0, 1.0)
-
-        # If 2D: promote to (1,H,W)
-        if arr.ndim == 2:
-            arr = arr[np.newaxis, :, :]  # grayscale assumption
-
-        # Validate shape
-        if arr.ndim != 3:
-            raise ValueError(f"ScorchTensor must be 3D (C,H,W), got shape {arr.shape}")
-
-        self.data = arr
-
-    # ===============================================================
-    # Introspection
-    # ===============================================================
-    @property
-    def shape(self):
-        return self.data.shape
-
-    @property
-    def ndim(self):
-        return self.data.ndim
-    
-
-    def clone(self) -> "ScorchTensor":
-        return ScorchTensor(self.data.copy(), name=self.name, role=self.role)
-
-    def flatten(self) -> "ScorchTensor":
-        c, h, w = self.data.shape
-        return ScorchTensor(self.data.reshape(1, c * h * w), name=self.name, role=self.role)
-
-    # ===============================================================
-    # Framework Export
-    # ===============================================================
-    def to_numpy(self) -> np.ndarray:
-        return self.data
-
-    def to_torch(self):
-        import torch
-        return torch.from_numpy(self.data.copy())
-
-    def to_tf(self):
-        import tensorflow as tf
-        arr = np.moveaxis(self.data, 0, -1)  # CHW → HWC
-        return tf.convert_to_tensor(arr)
-
-    # ===============================================================
-    # ScorchTensor → Bitmap (for visualization)
-    # ===============================================================
-    def to_bitmap(self) -> Bitmap:
+    def convolve(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int) -> Bitmap:
         """
-        Convert this ScorchTensor back into a Bitmap.
+        TRIM-only convolution.
 
-        Assumes:
-        - data ∈ [0,1]
-        - shape = (C,H,W)
-        - C = 1 or 3
+        - `mask` is mask[x][y] (your x-major convention).
+        - Output size is (self.width - 2*trim_h, self.height - 2*trim_v).
+        - Only computes outputs whose entire shifted kernel footprint is in-bounds.
+        If trim/offset/mask would sample out of bounds, raises ValueError.
+        - `edge_behavior` is intentionally ignored to keep single responsibility.
         """
-        arr = self.data
 
-        if arr.size == 0:
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_width = len(mask)
+        if mask_width <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_height = len(mask[0])
+        if mask_height <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_width):
+            if len(mask[x]) != mask_height:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_width % 2) != 1 or (mask_height % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
             return Bitmap()
 
-        c, h, w = arr.shape
+        # ----------------------------
+        # Output region (TRIM)
+        # ----------------------------
+        start_x = int(trim_h)
+        end_x = int(self.width - trim_h)   # exclusive
+        start_y = int(trim_v)
+        end_y = int(self.height - trim_v)  # exclusive
 
-        if c not in (1, 3):
-            raise ValueError(f"Cannot convert tensor with C={c} to Bitmap")
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
 
-        # Scale back to byte range
-        img = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        result = Bitmap(width=out_w, height=out_h)
 
-        # Allocate Bitmap
-        bmp = Bitmap(w, h)
+        # ----------------------------
+        # Kernel radii
+        # ----------------------------
+        rx = mask_width // 2
+        ry = mask_height // 2
 
-        if c == 1:
-            # grayscale: broadcast to rgb
-            gray = img[0, :, :]
-            for x in range(w):
-                col = bmp.rgba[x]
-                for y in range(h):
-                    v = int(gray[y, x])
-                    px = col[y]
-                    px.ri = v
-                    px.gi = v
-                    px.bi = v
-                    px.ai = 255
+        # ----------------------------
+        # TRIM preflight: shifted footprint must fit for the entire output region
+        # ----------------------------
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
 
-        else:
-            # RGB channels
-            r = img[0, :, :]
-            g = img[1, :, :]
-            b = img[2, :, :]
-            for x in range(w):
-                col = bmp.rgba[x]
-                for y in range(h):
-                    px = col[y]
-                    px.ri = int(r[y, x])
-                    px.gi = int(g[y, x])
-                    px.bi = int(b[y, x])
-                    px.ai = 255
+        if min_x < 0 or max_x >= self.width or min_y < 0 or max_y >= self.height:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_width}x{mask_height} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={self.width}x{self.height}"
+            )
 
-        return bmp
+        # ----------------------------
+        # Convolution
+        # ----------------------------
+        for base_x in range(start_x, end_x):
+            out_x = base_x - start_x
+            for base_y in range(start_y, end_y):
+                out_y = base_y - start_y
+
+                sum_r = 0.0
+                sum_g = 0.0
+                sum_b = 0.0
+                sum_a = 0.0
+
+                for shift_x in range(-rx, rx + 1):
+                    kx = shift_x + rx
+                    src_x = base_x + shift_x + offset_x
+                    mask_col = mask[kx]  # mask[x][y] column
+
+                    for shift_y in range(-ry, ry + 1):
+                        ky = shift_y + ry
+                        src_y = base_y + shift_y + offset_y
+
+                        w = float(mask_col[ky])
+                        if w == 0.0:
+                            continue
+
+                        px = self.rgba[src_x][src_y]
+                        sum_r += float(px.ri) * w
+                        sum_g += float(px.gi) * w
+                        sum_b += float(px.bi) * w
+                        sum_a += float(px.ai) * w
+
+                # Round-to-nearest (weights assumed non-negative)
+                ri = RGBA._clamp_int(int(sum_r + 0.5))
+                gi = RGBA._clamp_int(int(sum_g + 0.5))
+                bi = RGBA._clamp_int(int(sum_b + 0.5))
+                ai = RGBA._clamp_int(int(sum_a + 0.5))
+
+                dst = result.rgba[out_x][out_y]
+                dst.ri = ri
+                dst.gi = gi
+                dst.bi = bi
+                dst.ai = ai
+
+        return result
     
-    def to_image(self):
+    def convolve_fast(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int,
+        edge_behavior,  # kept for signature compatibility; ignored (always TRIM)
+    ) -> Bitmap:
         """
-        Convert this ScorchTensor directly to a Pillow Image.
-
-        Internally:
-        - Uses to_bitmap() to rebuild a Bitmap
-        - Then calls Bitmap.export_pillow() to get a Pillow Image
+        Fast TRIM-only convolution.
+        Matches your convolve() output semantics (mask[x][y], rounding, clamping, output size).
         """
-        bmp = self.to_bitmap()
-        return bmp.export_pillow()
+
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_w = len(mask)
+        if mask_w <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_h = len(mask[0])
+        if mask_h <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_w):
+            if len(mask[x]) != mask_h:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_w % 2) != 1 or (mask_h % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
+            return Bitmap()
+
+        # ----------------------------
+        # Output region
+        # ----------------------------
+        W = self.width
+        H = self.height
+
+        start_x = int(trim_h)
+        end_x   = int(W - trim_h)   # exclusive
+        start_y = int(trim_v)
+        end_y   = int(H - trim_v)   # exclusive
+
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
+
+        # ----------------------------
+        # Kernel radii
+        # ----------------------------
+        rx = mask_w // 2
+        ry = mask_h // 2
+
+        # ----------------------------
+        # TRIM preflight: shifted footprint must fit
+        # ----------------------------
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
+
+        if min_x < 0 or max_x >= W or min_y < 0 or max_y >= H:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_w}x{mask_h} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={W}x{H}"
+            )
+
+        # ----------------------------
+        # Convert input bitmap to NumPy BGRA (H x W x 4)
+        # ----------------------------
+        src_bgra_u8 = self.export_opencv()  # BGRA uint8, shape (H,W,4)
+
+        # Accumulator in float32
+        acc = np.zeros((out_h, out_w, 4), dtype=np.float32)
+
+        # ----------------------------
+        # Convert mask[x][y] -> mask_np[ky,kx] as HxW (row-major) for iteration
+        # This preserves your mask convention but lets us iterate ky/kx naturally.
+        # ----------------------------
+        mask_np = np.empty((mask_h, mask_w), dtype=np.float32)
+        for x in range(mask_w):
+            col = mask[x]
+            for y in range(mask_h):
+                mask_np[y, x] = float(col[y])
+
+        # ----------------------------
+        # Vectorized convolution via slicing per tap
+        # (ky,kx loop, but each tap is a big NumPy slice multiply-add)
+        # ----------------------------
+        for ky in range(mask_h):
+            shift_y = ky - ry
+            sy0 = start_y + shift_y + offset_y
+            sy1 = end_y   + shift_y + offset_y
+
+            for kx in range(mask_w):
+                w = float(mask_np[ky, kx])
+                if w == 0.0:
+                    continue
+
+                shift_x = kx - rx
+                sx0 = start_x + shift_x + offset_x
+                sx1 = end_x   + shift_x + offset_x
+
+                # src slice is (out_h, out_w, 4)
+                acc += src_bgra_u8[sy0:sy1, sx0:sx1, :].astype(np.float32) * w
+
+        # ----------------------------
+        # Match your rounding + clamp:
+        # int(sum + 0.5) then clamp [0,255]
+        # ----------------------------
+        out_bgra_u8 = np.clip(acc + 0.5, 0.0, 255.0).astype(np.uint8)
+
+        # ----------------------------
+        # Convert back to Bitmap (import_opencv expects BGRA)
+        # ----------------------------
+        result = Bitmap(out_w, out_h)
+        result.import_opencv(out_bgra_u8)
+        return result
+    
+    def convolve_torch(
+        self,
+        mask: List[List[float]],
+        trim_h: int,
+        trim_v: int,
+        offset_x: int,
+        offset_y: int,
+        device: str = "cpu",
+    ) -> Bitmap:
+        """
+        TRIM-only convolution using PyTorch as the compute engine.
+
+        Semantics:
+        - mask is mask[x][y] (x-major)
+        - output size is (W - 2*trim_h, H - 2*trim_v)
+        - offset shifts the sampling center like your reference convolve()
+        - channel-independent: same kernel applied to B,G,R,A separately (no mixing)
+        - returns Bitmap via import_opencv (BGRA)
+
+        Note:
+        - Matches your reference within typical tolerance=1 due to float accumulation order.
+        """
+
+        # ----------------------------
+        # Validate mask geometry
+        # ----------------------------
+        mask_w = len(mask)
+        if mask_w <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        mask_h = len(mask[0])
+        if mask_h <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+
+        for x in range(mask_w):
+            if len(mask[x]) != mask_h:
+                raise ValueError("Invalid mask supplied: non-rectangular mask (columns have different heights).")
+
+        if (mask_w % 2) != 1 or (mask_h % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+
+        if trim_h < 0 or trim_v < 0:
+            raise ValueError("trim_h/trim_v must be >= 0.")
+
+        if self.width <= 0 or self.height <= 0:
+            return Bitmap()
+
+        W = self.width
+        H = self.height
+
+        start_x = int(trim_h)
+        end_x   = int(W - trim_h)    # exclusive
+        start_y = int(trim_v)
+        end_y   = int(H - trim_v)    # exclusive
+
+        out_w = end_x - start_x
+        out_h = end_y - start_y
+        if out_w <= 0 or out_h <= 0:
+            return Bitmap()
+
+        rx = mask_w // 2
+        ry = mask_h // 2
+
+        # TRIM preflight: shifted footprint must fit
+        min_x = start_x - rx + offset_x
+        max_x = (end_x - 1) + rx + offset_x
+        min_y = start_y - ry + offset_y
+        max_y = (end_y - 1) + ry + offset_y
+        if min_x < 0 or max_x >= W or min_y < 0 or max_y >= H:
+            raise ValueError(
+                f"Invalid TRIM convolution bounds. "
+                f"mask={mask_w}x{mask_h} trim=({trim_h},{trim_v}) offset=({offset_x},{offset_y}) "
+                f"required sample bounds x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
+                f"image={W}x{H}"
+            )
+
+        # ----------------------------
+        # Convert mask[x][y] -> mask_np[ky,kx] (row-major)
+        # ----------------------------
+        mask_np = np.empty((mask_h, mask_w), dtype=np.float32)
+        for x in range(mask_w):
+            col = mask[x]
+            for y in range(mask_h):
+                mask_np[y, x] = float(col[y])
+
+        # ----------------------------
+        # Export bitmap to BGRA (H,W,4) uint8
+        # ----------------------------
+        src_bgra_u8 = self.export_opencv()
+
+        # Torch tensors: input [N,C,H,W] float32
+        # We keep BGRA channel order to match your import/export bridge.
+        x = torch.from_numpy(src_bgra_u8).to(device=device)
+        x = x.permute(2, 0, 1).unsqueeze(0).contiguous().float()  # [1,4,H,W]
+
+        # Weight for depthwise conv: [C,1,kH,kW], groups=C
+        k = torch.from_numpy(mask_np).to(device=device).float()   # [kH,kW]
+        w = k.view(1, 1, mask_h, mask_w).repeat(4, 1, 1, 1)       # [4,1,kH,kW]
+
+        with torch.no_grad():
+            full = F.conv2d(x, w, bias=None, stride=1, padding=0, groups=4)  # [1,4,H-kH+1,W-kW+1]
+
+            # Map your (start_x/start_y, offset) into conv output coordinates:
+            # conv output (oy,ox) corresponds to input center at (oy+ry, ox+rx)
+            # we want center at (base_y+offset_y, base_x+offset_x)
+            # base ranges: base_x=start_x..end_x-1, base_y=start_y..end_y-1
+            ox0 = start_x + offset_x - rx
+            oy0 = start_y + offset_y - ry
+
+            out = full[:, :, oy0:oy0 + out_h, ox0:ox0 + out_w]  # [1,4,out_h,out_w]
+
+            # Match your rounding+clamp: int(sum + 0.5) then clamp [0,255]
+            out_u8 = torch.clamp(out + 0.5, 0.0, 255.0).to(torch.uint8)
+
+        # Back to numpy BGRA (H,W,4)
+        out_bgra_u8 = out_u8.squeeze(0).permute(1, 2, 0).contiguous().cpu().numpy()
+
+        # Import to Bitmap
+        result = Bitmap(out_w, out_h)
+        result.import_opencv(out_bgra_u8)
+        return result
+
+    def compare(self, bitmap: Optional[Bitmap], tolerance: int) -> bool:
+        if not bitmap:
+            return False
+        if self.width != bitmap.width:
+            return False
+        if self.height != bitmap.height:
+            return False
+        for x in range(self.width):
+            for y in range(self.height):
+                if abs(self.rgba[x][y].ri - bitmap.rgba[x][y].ri) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].gi - bitmap.rgba[x][y].gi) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].bi - bitmap.rgba[x][y].bi) > tolerance:
+                    return False
+                if abs(self.rgba[x][y].ai - bitmap.rgba[x][y].ai) > tolerance:
+                    return False
+        return True
+                
+
+    """
+    def convolve(self,
+                 mask: List[List[float]],
+                 trim_h: int,
+                 trim_v: int,
+                 offset_x: int,
+                 offset_y: int,
+                 edge_behavior: ConvolutionEdgeBehavior) -> Bitmap:
+        
+        mask_width = len(mask)
+        mask_height = 0
+        if mask_width > 0:
+            mask_height = len(mask[0])
+
+        if mask_width <= 0 or mask_height <= 0:
+            raise ValueError("Invalid mask supplied, requires non-zero dimensions.")
+        
+        if (mask_width % 2) != 1 or (mask_height % 2) != 1:
+            raise ValueError("Invalid mask supplied, requires odd x odd dimensions.")
+        
+        mask_width_2 = mask_width // 2
+        start_x = trim_h
+        end_x = self.width - trim_h
+        if start_x - mask_width_2 + offset_x < 0:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        if end_x + mask_width_2 + offset_x > self.width:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        
+        mask_height_2 = mask_height // 2
+        start_y = trim_h
+        end_y = self.height - trim_v
+        if start_y - mask_height_2 + offset_y < 0:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        if end_y + mask_height_2 + offset_y > self.height:
+            raise ValueError("Invalid mask and offset. " + str(mask_width) + str("x") + str(mask_height) + " mask, " + str(offset_x) + str("x") + str(offset_y) + " offset.")
+        
+
+        result = Bitmap(width=self.width-(trim_h + trim_h), height=self.height-(trim_v + trim_v))
+
+        # switch edge_behavior:
 
 
 
-# ===== torch_adam.py =====
+        for base_x in range(start_x, end_x):
+            for base_y in range(start_y, end_y):
+                sum_r = float(0.0)
+                sum_g = float(0.0)
+                sum_b = float(0.0)
+                sum_a = float(0.0)
 
-# torch_adam.py
+                for shift_x in range(-mask_width_2, mask_width_2 + 1):
+                    x = base_x + shift_x + offset_x
+                    for shift_y in range(-mask_height_2, mask_height_2 + 1):
+                        y = base_y + shift_y + offset_y
+
+                        mask_factor = mask[shift_x + mask_width_2][shift_y + mask_height_2]
+
+                        acc_r = float(self.rgba[x][y].ri) * mask_factor
+                        acc_g = float(self.rgba[x][y].gi) * mask_factor
+                        acc_b = float(self.rgba[x][y].bi) * mask_factor
+                        acc_a = float(self.rgba[x][y].ai) * mask_factor
+
+                        sum_r += acc_r
+                        sum_g += acc_g
+                        sum_b += acc_b
+                        sum_a += acc_a
+                
+                ri = RGBA._clamp_int(int(sum_r + 0.5))
+                gi = RGBA._clamp_int(int(sum_g + 0.5))
+                bi = RGBA._clamp_int(int(sum_b + 0.5))
+                ai = RGBA._clamp_int(int(sum_a + 0.5))
+
+                result.rgba[base_x - trim_h][base_y - trim_v].ri = ri
+                result.rgba[base_x - trim_h][base_y - trim_v].gi = gi
+                result.rgba[base_x - trim_h][base_y - trim_v].bi = bi
+                result.rgba[base_x - trim_h][base_y - trim_v].ai = ai
+
+        return result
+    """
+
+
+# ===== convolution_edge_behavior.py =====
+
+from enum import Enum, auto
+
+class ConvolutionEdgeBehavior(Enum):
+    """
+    Defines how convolution handles samples that fall outside the bitmap.
+    """
+
+    TRIM = auto()
+    """
+    Do not sample outside the bitmap.
+    Output image is smaller (valid convolution).
+    """
+
+    COPY = auto()
+    """
+    Clamp coordinates to the nearest valid pixel.
+    (Edge pixels are repeated outward.)
+    """
+
+    BLACK = auto()
+    """
+    Treat out-of-bounds samples as black (0,0,0,0).
+    """
+
+
+
+# ===== rgba.py =====
+
+# rgba.py
+
+class RGBA:
+
+    __slots__ = ("_r", "_g", "_b", "_a")
+
+    def __init__(self, r: int, g: int, b: int, a: int = 255):
+        self._r = self._clamp_int(r)
+        self._g = self._clamp_int(g)
+        self._b = self._clamp_int(b)
+        self._a = self._clamp_int(a)
+
+    # ------------------------------
+    # Helpers
+    # ------------------------------
+    @staticmethod
+    def _clamp_int(v):
+        return max(0, min(255, int(v)))
+
+    @staticmethod
+    def _clamp_float(v):
+        return max(0.0, min(1.0, float(v)))
+
+    # ------------------------------
+    # Integer accessors (0–255)
+    # ------------------------------
+    @property
+    def ri(self):
+        return self._r
+
+    @ri.setter
+    def ri(self, v):
+        self._r = self._clamp_int(v)
+
+    @property
+    def gi(self):
+        return self._g
+
+    @gi.setter
+    def gi(self, v):
+        self._g = self._clamp_int(v)
+
+    @property
+    def bi(self):
+        return self._b
+
+    @bi.setter
+    def bi(self, v):
+        self._b = self._clamp_int(v)
+
+    @property
+    def ai(self):
+        return self._a
+
+    @ai.setter
+    def ai(self, v):
+        self._a = self._clamp_int(v)
+
+    # ------------------------------
+    # Float accessors (0.0–1.0)
+    # ------------------------------
+    @property
+    def rf(self):
+        return self._r / 255.0
+
+    @rf.setter
+    def rf(self, v):
+        self._r = int(self._clamp_float(v) * 255)
+
+    @property
+    def gf(self):
+        return self._g / 255.0
+
+    @gf.setter
+    def gf(self, v):
+        self._g = int(self._clamp_float(v) * 255)
+
+    @property
+    def bf(self):
+        return self._b / 255.0
+
+    @bf.setter
+    def bf(self, v):
+        self._b = int(self._clamp_float(v) * 255)
+
+    @property
+    def af(self):
+        return self._a / 255.0
+
+    @af.setter
+    def af(self, v):
+        self._a = int(self._clamp_float(v) * 255)
+
+   # ------------------------------
+    # Utility
+    # ------------------------------
+    @classmethod
+    def to_gray(cls, r, g, b) -> float:
+        return (
+            0.299 * r
+            + 0.587 * g
+            + 0.114 * b
+        )
+    
+    def to_gray(self) -> int:
+        gray = 0.299 * self._r + 0.587 * self._g + 0.114 * self._g
+        return self._clamp_int(round(gray))
+    
+    def tuple(self):
+        return (self._r, self._g, self._b, self._a)
+    
+    def __str__(self):
+        return f"({self.rf:0.2f}, {self.gf:0.2f}, {self.bf:0.2f}, {self.af:0.2f})"
+
+    def __repr__(self):
+        return self.__str__()
+    
+    # ------------------------------
+    # Blending helpers (OpenGL-style)
+    # ------------------------------
+    @staticmethod
+    def blend_alpha(src: "RGBA", dst: "RGBA") -> "RGBA":
+        """
+        Classic alpha blending:
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        """
+        sa = src.af
+        da = dst.af
+
+        out_a = sa + da * (1.0 - sa)
+        if out_a == 0.0:
+            return RGBA(0, 0, 0, 0)
+
+        out_r = src.rf * sa + dst.rf * (1.0 - sa)
+        out_g = src.gf * sa + dst.gf * (1.0 - sa)
+        out_b = src.bf * sa + dst.bf * (1.0 - sa)
+
+        return RGBA(
+            int(out_r * 255),
+            int(out_g * 255),
+            int(out_b * 255),
+            int(out_a * 255),
+        )
+
+    @staticmethod
+    def blend_additive(src: "RGBA", dst: "RGBA") -> "RGBA":
+        """
+        Additive blending:
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+        """
+        sa = src.af
+        da = dst.af
+
+        out_a = min(1.0, sa + da)
+
+        out_r = src.rf * sa + dst.rf
+        out_g = src.gf * sa + dst.gf
+        out_b = src.bf * sa + dst.bf
+
+        # No manual clamp needed: RGBA(...) constructor clamps 0–255
+        return RGBA(
+            int(out_r * 255),
+            int(out_g * 255),
+            int(out_b * 255),
+            int(out_a * 255),
+        )
+
+
+# ========== ROOT: /Users/naraptis/Desktop/Combustion/labels ==========
+
+# ===== data_label.py =====
+
+# data_label.py
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
-import numpy as np
+from typing import Any, Dict
+from labels.pixel_bag import PixelBag
 
-from .scorch_optimizer import ScorchOptimizer, TorchParam
-
-class TorchAdam(ScorchOptimizer):
+class DataLabel:
     """
-    Minimal Adam optimizer (NumPy / Scorch-friendly).
+    Associates a string name with a PixelBag.
 
-    Matches the standard Adam update:
+    JSON format:
 
-        m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-        v_t = beta2 * v_{t-1} + (1 - beta2) * (g_t ** 2)
+        {
+            "name": "some_label_name",
+            "pixels": [ { "y": ..., "x_start": ..., "x_end": ... }, ... ]
+        }
+    """
 
-        m_hat = m_t / (1 - beta1 ** t)
-        v_hat = v_t / (1 - beta2 ** t)
+    def __init__(self, name: str, pixel_bag: PixelBag | None = None) -> None:
+        self.name: str = name
+        self.pixel_bag: PixelBag = pixel_bag if pixel_bag is not None else PixelBag()
 
-        param = param - lr * m_hat / (sqrt(v_hat) + eps)
+
+    # --------------------------------------------------
+    # PixelBag passthrough wrappers
+    # --------------------------------------------------
+    def clear(self) -> None:
+        self.pixel_bag.clear()
+
+    def add(self, x: int, y: int) -> None:
+        self.pixel_bag.add(x, y)
+
+    def remove(self, x: int, y: int) -> None:
+        self.pixel_bag.remove(x, y)
+
+    def contains(self, x: int, y: int) -> bool:
+        return self.pixel_bag.contains(x, y)
+
+    # --------------------------------------------------
+    # JSON serialization
+    # --------------------------------------------------
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "pixels": self.pixel_bag.to_json(),
+        }
+
+    @staticmethod
+    def from_json(data: Dict[str, Any]) -> "DataLabel":
+        name = data.get("name", "")
+        pixels_json = data.get("pixels", [])
+        bag = PixelBag.from_json(pixels_json)
+        return DataLabel(name=name, pixel_bag=bag)
+
+    # --------------------------------------------------
+    # Utility / debug printing (summary style)
+    # --------------------------------------------------
+    def __repr__(self) -> str:
+        """
+        One-line compact summary, e.g.:
+
+            DataLabel(name="lymph",
+                      bag=PixelBag(count=100, median=(15,35), size=(10,10)))
+
+        If bag is empty:
+
+            DataLabel(name="lymph", bag=PixelBag(count=0))
+        """
+        return f'DataLabel(name="{self.name}", bag={self.pixel_bag})'
+
+
+
+# ===== data_label_collection.py =====
+
+# data_label_collection.py
+from __future__ import annotations
+
+from typing import Any, Dict, List, Iterable
+
+from labels.data_label import DataLabel
+
+class DataLabelCollection:
+    """
+    A simple list of DataLabel objects.
+
+    Multiple labels may share the same name. Each DataLabel typically
+    represents one instance (one PixelBag region).
+    """
+
+    def __init__(self, labels: List[DataLabel] | None = None) -> None:
+        self.labels: List[DataLabel] = labels or []
+
+    # --------------------------------------------------
+    # Basic operations
+    # --------------------------------------------------
+    def add_label(self, label: DataLabel) -> None:
+        """
+        Append a label. Multiple labels may have the same name.
+        """
+        self.labels.append(label)
+
+    def remove_label(self, label: DataLabel) -> None:
+        """
+        Remove this exact label object from the collection, if present.
+        Does nothing if the label is not in the collection.
+        """
+        try:
+            self.labels.remove(label)
+        except ValueError:
+            # label not in list; ignore
+            pass
+
+    def get_labels_by_name(self, name: str) -> List[DataLabel]:
+        """
+        Return all labels whose name matches the given name.
+        May return an empty list.
+        """
+        return [lbl for lbl in self.labels if lbl.name == name]
+
+    def first_label(self, name: str) -> DataLabel | None:
+        """
+        Convenience: return the first label with this name, or None.
+        """
+        for lbl in self.labels:
+            if lbl.name == name:
+                return lbl
+        return None
+
+    # --------------------------------------------------
+    # JSON serialization (array only)
+    # --------------------------------------------------
+    def to_json(self) -> List[Dict[str, Any]]:
+        """
+        Return a JSON-compatible list of label dicts, no wrapper.
+        """
+        return [label.to_json() for label in self.labels]
+
+    @staticmethod
+    def from_json(data: List[Dict[str, Any]]) -> "DataLabelCollection":
+        """
+        Parse a list of label objects.
+        """
+        labels = [DataLabel.from_json(item) for item in data]
+        return DataLabelCollection(labels=labels)
+
+    # --------------------------------------------------
+    # Helpers
+    # --------------------------------------------------
+    def __len__(self):
+        return len(self.labels)
+
+    def __iter__(self) -> Iterable[DataLabel]:
+        return iter(self.labels)
+
+    def _sorted_labels(self) -> List[DataLabel]:
+        """
+        Return labels sorted by:
+          1) name (alphabetical)
+          2) median.y  (ascending)
+          3) median.x  (ascending)
+
+        Uses PixelBag.summary().median so we don't have to look at stripes.
+        Empty bags get a large sentinel so they sort last within a name.
+        """
+        if not self.labels:
+            return []
+
+        def sort_key(label: DataLabel):
+            name = label.name
+            summary = label.pixel_bag.summary()
+            median = summary.get("median")
+
+            if median is None:
+                # Empty bag: push to the end for that name
+                my = 10**9
+                mx = 10**9
+            else:
+                mx, my = median  # median is (x, y)
+
+            return (name, my, mx)
+
+        return sorted(self.labels, key=sort_key)
+
+    def __repr__(self) -> str:
+        """
+        Compact summary of the collection plus one-line summary per label, e.g.:
+
+            DataLabelCollection(count=2):
+                DataLabel(name="basal", bag=PixelBag(...))
+                DataLabel(name="lymph", bag=PixelBag(...))
+        """
+        count = len(self.labels)
+        if count == 0:
+            return "DataLabelCollection(count=0)"
+
+        lines: List[str] = [f"DataLabelCollection(count={count}):"]
+        for label in self._sorted_labels():
+            lines.append(f"    {label!r}")
+        return "\n".join(lines)
+    
+
+
+# ===== image_annotation_document.py =====
+
+# image_annotation_document.py
+from __future__ import annotations
+
+from typing import Any, Dict, List
+from labels.data_label_collection import DataLabelCollection
+
+class ImageAnnotationDocument:
+    """
+    Top-level container for annotations for a single image.
+
+    Fields:
+      - name:             Logical name for this document (often the JSON filename).
+      - width:            Image width in pixels.
+      - height:           Image height in pixels.
+      - data:             DataLabelCollection holding all individual labels.
+      - data_label_names: Derived list of label names present in `data`.
     """
 
     def __init__(
         self,
-        params: Iterable[TorchParam],
-        lr: float = 1e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
-        eps: float = 1e-8,
-        weight_decay: float = 0.0,
+        name: str,
+        width: int,
+        height: int,
+        data: DataLabelCollection | None = None,
     ) -> None:
-        super().__init__(params, lr=lr)
+        self.name: str = name
+        self.width: int = int(width)
+        self.height: int = int(height)
+        # data is conceptually non-optional; default to empty collection if None
+        self.data: DataLabelCollection = data if data is not None else DataLabelCollection()
 
-        beta1, beta2 = betas
-        if not 0.0 <= beta1 < 1.0:
-            raise ValueError(f"Invalid beta1: {beta1}")
-        if not 0.0 <= beta2 < 1.0:
-            raise ValueError(f"Invalid beta2: {beta2}")
-        if not 0.0 <= eps:
-            raise ValueError(f"Invalid eps: {eps}")
-        if not 0.0 <= weight_decay:
-            raise ValueError(f"Invalid weight_decay: {weight_decay}")
-
-        self.beta1 = float(beta1)
-        self.beta2 = float(beta2)
-        self.eps = float(eps)
-        self.weight_decay = float(weight_decay)
-
-        # One state tuple per parameter: (m, v, step)
-        self._m: List[np.ndarray] = []
-        self._v: List[np.ndarray] = []
-        self._step: List[int] = []
-
-        for p in self.params:
-            # Lazily initialize state to zeros of matching shape
-            self._m.append(np.zeros_like(p.data, dtype=np.float32))
-            self._v.append(np.zeros_like(p.data, dtype=np.float32))
-            self._step.append(0)
-
-    def step(self) -> None:
+    # --------------------------------------------------
+    # Derived properties
+    # --------------------------------------------------
+    @property
+    def data_label_names(self) -> List[str]:
         """
-        Perform a single Adam update on all parameters.
-        Assumes .grad has been filled for each TorchParam (or left None).
+        Return a sorted list of unique label names present in this document's data.
         """
-        beta1 = self.beta1
-        beta2 = self.beta2
-        eps = self.eps
-        lr = self.lr
-        wd = self.weight_decay
+        names = {label.name for label in self.data}
+        return sorted(names)
 
-        for i, p in enumerate(self.params):
-            g = p.grad
-            if g is None:
-                continue  # no gradient, skip
+    # --------------------------------------------------
+    # JSON serialization
+    # --------------------------------------------------
+    def to_json(self) -> Dict[str, Any]:
+        """
+        Return a JSON-compatible dict representing this document.
 
-            # Optional L2 weight decay (classic, not decoupled AdamW)
-            if wd != 0.0:
-                g = g + wd * p.data
+        Layout:
 
-            m = self._m[i]
-            v = self._v[i]
+        {
+          "name":             str,
+          "width":            int,
+          "height":           int,
+          "data_label_names": [str, ...],
+          "labels":           [ ... DataLabel.to_json() ... ]
+        }
 
-            # Increase step count
-            self._step[i] += 1
-            t = self._step[i]
+        Note: data_label_names is derived from `data` at serialization time.
+        """
+        return {
+            "name": self.name,
+            "width": self.width,
+            "height": self.height,
+            "data_label_names": self.data_label_names,
+            "labels": self.data.to_json(),
+        }
 
-            # m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-            m[:] = beta1 * m + (1.0 - beta1) * g
+    @staticmethod
+    def from_json(data: Dict[str, Any]) -> "ImageAnnotationDocument":
+        """
+        Parse an ImageAnnotationDocument from a JSON-compatible dict.
 
-            # v_t = beta2 * v_{t-1} + (1 - beta2) * (g_t ** 2)
-            v[:] = beta2 * v + (1.0 - beta2) * (g * g)
+        data_label_names from JSON are currently ignored as a source of truth,
+        since they can always be recomputed from the label data. They are
+        still read (if present) to allow future validation if desired.
+        """
+        name = data.get("name", "")
+        width = int(data.get("width", 0))
+        height = int(data.get("height", 0))
 
-            # Bias corrections
-            bias_correction1 = 1.0 - (beta1 ** t)
-            bias_correction2 = 1.0 - (beta2 ** t)
+        labels_raw = data.get("labels", []) or []
+        dlc = DataLabelCollection.from_json(labels_raw)
 
-            m_hat = m / bias_correction1
-            v_hat = v / bias_correction2
+        # data_label_names = data.get("data_label_names", [])  # optional; not required
 
-            # Parameter update
-            p.data[:] = p.data - lr * m_hat / (np.sqrt(v_hat) + eps)
+        return ImageAnnotationDocument(
+            name=name,
+            width=width,
+            height=height,
+            data=dlc,
+        )
+
+    # --------------------------------------------------
+    # Debug / repr
+    # --------------------------------------------------
+    def __repr__(self) -> str:
+        """
+        Compact summary plus an indented listing of labels via
+        DataLabelCollection.__repr__.
+
+        Example:
+
+            ImageAnnotationDocument(name="sample_01",
+                                    size=(256, 256),
+                                    data_label_names=['Alphacyte', 'Lymphocyte'],
+                                    label_count=3):
+                DataLabel(name="Alphacyte", bag=PixelBag(...))
+                DataLabel(name="Lymphocyte", bag=PixelBag(...))
+                ...
+        """
+        label_count = len(self.data)
+        header = (
+            f'ImageAnnotationDocument('
+            f'name="{self.name}", '
+            f'size=({self.width}, {self.height}), '
+            f'data_label_names={self.data_label_names}, '
+            f'label_count={label_count})'
+        )
+
+        if label_count == 0:
+            return header
+
+        # Indent the DataLabelCollection repr by 4 spaces
+        dlc_lines = repr(self.data).splitlines()
+        indented_dlc = "\n".join("    " + line for line in dlc_lines)
+
+        return header + ":\n" + indented_dlc
+
+
+
+# ===== pixel_bag.py =====
+
+# pixel_bag.py
+from __future__ import annotations
+from typing import Any, List
+from labels.pixel_bag_run_length import PixelBagRunLength
+from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
+
+class PixelBag:
+    """
+    Stores a set of (x, y) integer pixel positions.
+    Does not store duplicates (internally a set),
+    but add/remove semantics allow double-add and remove-nonexistent
+    without raising exceptions.
+    """
+
+    def __init__(self) -> None:
+        self._set = set()   # stores (x, y)
+
+    # --------------------------------------------------
+    # Basic operations
+    # --------------------------------------------------
+    def clear(self) -> None:
+        self._set.clear()
+
+    def add(self, x: int, y: int) -> None:
+        """Add a pixel. Adding an existing pixel is allowed and ignored."""
+        self._set.add((int(x), int(y)))
+
+    def remove(self, x: int, y: int) -> None:
+        """Remove a pixel. Removing a missing pixel is allowed and ignored."""
+        self._set.discard((int(x), int(y)))  # discard() never raises
+
+    def contains(self, x: int, y: int) -> bool:
+        """Check if a pixel exists in the bag."""
+        return (int(x), int(y)) in self._set
+
+    # --------------------------------------------------
+    # Bounding box helpers
+    # --------------------------------------------------
+    @property
+    def xmin(self):
+        if not self._set:
+            return None
+        return min(px for (px, _) in self._set)
+
+    @property
+    def xmax(self):
+        if not self._set:
+            return None
+        return max(px for (px, _) in self._set)
+
+    @property
+    def ymin(self):
+        if not self._set:
+            return None
+        return min(py for (_, py) in self._set)
+
+    @property
+    def ymax(self):
+        if not self._set:
+            return None
+        return max(py for (_, py) in self._set)
+    
+    @property
+    def frame(self):
+        if not self._set:
+            return (0, 0, 0, 0)
+
+        xr = self.xrange()
+        yr = self.yrange()
+        
+        width  = xr.stop - xr.start
+        height = yr.stop - yr.start
+
+        return (xr.start, yr.start, width, height)
+
+    # --------------------------------------------------
+    # Ranges for easy looping
+    # --------------------------------------------------
+    def xrange(self):
+        """
+        Return range(xmin, xmax+1).
+        If empty, return range(0).
+        """
+        if not self._set:
+            return range(0)
+        return range(self.xmin, self.xmax + 1)
+
+    def yrange(self):
+        """
+        Return range(ymin, ymax+1).
+        If empty, return range(0).
+        """
+        if not self._set:
+            return range(0)
+        return range(self.ymin, self.ymax + 1)
+
+    # --------------------------------------------------
+    # Utility
+    # --------------------------------------------------
+    def __len__(self):
+        return len(self._set)
+
+    def __iter__(self):
+        """Iterate over (x, y) pairs."""
+        return iter(self._set)
+
+    def summary(self) -> dict:
+        """
+        Return summary statistics:
+
+            {
+            "count": int,
+            "median": (x_med, y_med) | None,
+            "size": (width, height)
+            }
+
+        width  = xmax - xmin + 1
+        height = ymax - ymin + 1
+        """
+        count = len(self._set)
+        if count == 0:
+            return {
+                "count": 0,
+                "median": None,
+                "size": (0, 0),
+            }
+
+        xs = [x for (x, _) in self._set]
+        ys = [y for (_, y) in self._set]
+
+        xs_sorted = sorted(xs)
+        ys_sorted = sorted(ys)
+        mid = count // 2
+
+        median_x = xs_sorted[mid]
+        median_y = ys_sorted[mid]
+
+        xmin = self.xmin
+        xmax = self.xmax
+        ymin = self.ymin
+        ymax = self.ymax
+
+        width = (xmax - xmin + 1) if xmin is not None and xmax is not None else 0
+        height = (ymax - ymin + 1) if ymin is not None and ymax is not None else 0
+
+        return {
+            "count": count,
+            "median": (median_x, median_y),
+            "size": (width, height),
+        }
+
+
+    def __repr__(self):
+        """
+        Compact one-line summary:
+
+            PixelBag(count=67, median=(46,77), size=(80, 111))
+        """
+        info = self.summary()
+        count = info["count"]
+
+        if count == 0:
+            return "PixelBag(count=0)"
+
+        mx, my = info["median"]
+        w, h = info["size"]
+
+        return (
+            f"PixelBag(count={count}, "
+            f"median=({mx}, {my}), "
+            f"size=({w}, {h}))"
+        )
+
+
+    # --------------------------------------------------
+    # Run-length conversion
+    # --------------------------------------------------
+    def to_run_length(self) -> "PixelBagRunLength":
+        result = PixelBagRunLength()
+
+        _xmin = self.xmin
+        _xmax = self.xmax
+        if _xmin is None or _xmax is None:
+            return result
+
+        for y in self.yrange():
+            x = _xmin
+            while x <= _xmax:
+                if self.contains(x, y):
+                    x_start = x
+                    x_end = x
+                    x += 1
+                    while x <= _xmax and self.contains(x, y):
+                        x_end = x
+                        x += 1
+                    result.add_stripe(PixelBagRunLengthStripe(y, x_start, x_end))
+                else:
+                    x += 1
+        return result
+
+    # --------------------------------------------------
+    # JSON serialization
+    # --------------------------------------------------
+    def to_json(self) -> List[Any]:
+        """
+        Serialize this PixelBag to a JSON-compatible list of run-length
+        stripe objects:
+            [ { "y": ..., "x_start": ..., "x_end": ... }, ... ]
+        """
+        rle = self.to_run_length()
+        return rle.to_json()
+
+    @staticmethod
+    def from_json(data: List[Any]) -> "PixelBag":
+        """
+        Deserialize a PixelBag from a JSON-compatible list produced
+        by PixelBag.to_json().
+
+        Reconstructs all (x, y) pixels from the run-length stripes.
+        """
+        rle = PixelBagRunLength.from_json(data)
+        bag = PixelBag()
+        for stripe in rle.stripes:
+            y = stripe.y
+            for x in range(stripe.x_start, stripe.x_end + 1):
+                bag.add(x, y)
+        return bag
+
+
+
+# ===== pixel_bag_run_length.py =====
+
+# pixel_bag_run_length.py
+from __future__ import annotations
+from typing import Any, Iterable, List
+
+from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
+
+class PixelBagRunLength:
+    """
+    Run-length representation of a PixelBag:
+    a list of horizontal stripes.
+    """
+
+    def __init__(self, stripes: List[PixelBagRunLengthStripe] | None = None) -> None:
+        self.stripes: List[PixelBagRunLengthStripe] = stripes or []
+
+    # --------------------------------------------------
+    # JSON serialization
+    # --------------------------------------------------
+    def to_json(self) -> List[Any]:
+        return [stripe.to_json() for stripe in self.stripes]
+
+    @staticmethod
+    def from_json(data: List[Any]) -> "PixelBagRunLength":
+        stripes = [PixelBagRunLengthStripe.from_json(item) for item in data]
+        return PixelBagRunLength(stripes=stripes)
+
+    # --------------------------------------------------
+    # Utility
+    # --------------------------------------------------
+    def add_stripe(self, stripe: PixelBagRunLengthStripe) -> None:
+        self.stripes.append(stripe)
+
+    def __len__(self) -> int:
+        return len(self.stripes)
+
+    def __iter__(self):
+        return iter(self.stripes)
+
+    # -------- central sorting helper --------
+    @staticmethod
+    def sorted_stripes(
+        stripes: Iterable[PixelBagRunLengthStripe],
+    ) -> List[PixelBagRunLengthStripe]:
+        return sorted(stripes, key=lambda s: (s.y, s.x_start))
+
+    def sorted(self) -> List[PixelBagRunLengthStripe]:
+        return PixelBagRunLength.sorted_stripes(self.stripes)
+
+    # --------------------------------------------------
+    # One-line summary repr
+    # --------------------------------------------------
+    def __repr__(self) -> str:
+        """
+        Compact one-line summary:
+        PixelBagRunLength(count=3, stripes=[Stripe(y=10,3→5), Stripe(y=11,7→7)])
+        """
+        if not self.stripes:
+            return "PixelBagRunLength(count=0, stripes=[])"
+
+        parts = []
+        for s in self.sorted():
+            parts.append(f"Stripe(y={s.y},{s.x_start}→{s.x_end})")
+
+        stripes_str = ", ".join(parts)
+        return f"PixelBagRunLength(count={len(self.stripes)}, stripes=[{stripes_str}])"
+
+
+
+# ===== pixel_bag_run_length_stripe.py =====
+
+# pixel_bag_run_length_stripe.py
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Dict
+
+@dataclass
+class PixelBagRunLengthStripe:
+    """
+    Represents a horizontal run of pixels at a fixed y:
+        x in [x_start, x_end] inclusive.
+    """
+    y: int
+    x_start: int
+    x_end: int
+
+    def to_json(self) -> Dict[str, Any]:
+        """
+        Serialize this stripe to a JSON-compatible dict.
+        """
+        return {
+            "y": int(self.y),
+            "x_start": int(self.x_start),
+            "x_end": int(self.x_end),
+        }
+
+    @staticmethod
+    def from_json(data: Dict[str, Any]) -> "PixelBagRunLengthStripe":
+        """
+        Deserialize a stripe from a JSON-compatible dict.
+        Expects keys: "y", "x_start", "x_end".
+        """
+        return PixelBagRunLengthStripe(
+            y=int(data["y"]),
+            x_start=int(data["x_start"]),
+            x_end=int(data["x_end"]),
+        )
+
+    # --------------------------------------------------
+    # Debug / printing helpers
+    # --------------------------------------------------
+    def repr_str(self, indent: int = 0) -> str:
+        """
+        Return a single-line string representation, with leading tabs
+        based on indent depth.
+        """
+        prefix = "\t" * max(indent, 0)
+        return f"{prefix}(y={self.y}, x_start={self.x_start}, x_end={self.x_end})"
+
+    def __repr__(self) -> str:
+        """
+        Default repr with no indentation.
+        """
+        return self.repr_str(indent=0)
+
+
+
+# ========== ROOT: /Users/naraptis/Desktop/Combustion/filesystem ==========
+
+# ===== file_io.py =====
+
+# file_io.py
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Union, List
+
+PathLike = Union[str, Path]
+
+class FileIO:
+
+    # ================================================================
+    # Path builders: directories + files
+    # ================================================================
+
+    @classmethod
+    def local_directory(cls, subdirectory: PathLike | None = None) -> Path:
+        """
+        Build a fully-qualified directory path inside the project root.
+        Strips any leading/trailing slashes.
+        """
+        project_root = Path(__file__).resolve().parent.parent
+
+        if subdirectory:
+            subdirectory = cls._strip_outer_slashes(str(subdirectory))
+            return (project_root / subdirectory).resolve()
+
+        return project_root
+
+    @classmethod
+    def local_file(
+        cls,
+        subdirectory: str | None = None,
+        name: str | None = None,
+        extension: str | None = None,
+    ) -> Path:
+        """
+        Build a fully-resolved file path inside the project using the
+        familiar subdirectory + name + extension pattern.
+
+        Example:
+            local_file("images", "cat", "png")
+            -> ROOT/images/cat.png
+        """
+        if name is None or len(name.strip()) == 0:
+            raise ValueError("local_file requires a non-empty 'name'")
+
+        # Clean outer slashes
+        if subdirectory:
+            subdirectory = cls._strip_outer_slashes(subdirectory)
+        name = cls._strip_outer_slashes(name)
+
+        name_path = Path(name)
+
+        # Extension override
+        if extension:
+            extension = extension.lstrip(".")
+            parent = name_path.parent
+            stem = name_path.stem
+
+            if str(parent) == ".":
+                file_name = f"{stem}.{extension}"
+            else:
+                file_name = str(parent / f"{stem}.{extension}")
+        else:
+            file_name = name
+
+        root = Path(__file__).resolve().parent.parent
+        if subdirectory:
+            final_path = root / subdirectory / file_name
+        else:
+            final_path = root / file_name
+
+        return final_path.resolve()
+
+    # ================================================================
+    # FILE LISTING (FLAT + RECURSIVE)
+    # ================================================================
+
+    @classmethod
+    def get_all_files(cls, directory: PathLike) -> List[Path]:
+        """
+        Return all direct (non-directory) files in directory.
+        """
+        dir_path = cls._to_path(directory)
+        if not dir_path.exists():
+            return []
+        return [p for p in dir_path.iterdir() if p.is_file()]
+
+    @classmethod
+    def get_all_files_local(cls, subdirectory: PathLike) -> List[Path]:
+        folder = cls.local_directory(subdirectory)
+        return cls.get_all_files(folder)
+
+    @classmethod
+    def get_all_files_recursive(cls, directory: PathLike) -> List[Path]:
+        """
+        Return all files in all nested subdirectories.
+        """
+        dir_path = cls._to_path(directory)
+        if not dir_path.exists():
+            return []
+        return [p for p in dir_path.rglob("*") if p.is_file()]
+
+    @classmethod
+    def get_all_files_local_recursive(cls, subdirectory: PathLike) -> List[Path]:
+        folder = cls.local_directory(subdirectory)
+        return cls.get_all_files_recursive(folder)
+
+    # ================================================================
+    # Helpers
+    # ================================================================
+
+    @classmethod
+    def _strip_outer_slashes(cls, s: str) -> str:
+        if not isinstance(s, str):
+            raise TypeError("Path must be a string")
+        return s.lstrip("/\\").rstrip("/\\")
+
+    @classmethod
+    def _ensure_parent_dir(cls, path: Path) -> None:
+        parent = path.parent
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def _to_path(cls, p: PathLike) -> Path:
+        if isinstance(p, Path):
+            return p.resolve()
+        return Path(p).resolve()
+
+    # ================================================================
+    # Core I/O: bytes only
+    # ================================================================
+
+    @classmethod
+    def load(cls, file_path: PathLike) -> bytes:
+        """
+        Load raw bytes from an explicit path.
+
+        Caller decides how to interpret the bytes (text, image, etc.).
+        """
+        path = cls._to_path(file_path)
+
+        if not path.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        return path.read_bytes()
+
+    @classmethod
+    def load_local(
+        cls,
+        subdirectory: str | None = None,
+        name: str | None = None,
+        extension: str | None = None,
+    ) -> bytes:
+        """
+        Build a local file path via local_file() and load raw bytes.
+        """
+        path = cls.local_file(subdirectory=subdirectory, name=name, extension=extension)
+        return cls.load(path)
+
+    @classmethod
+    def save(cls, data: bytes, file_path: PathLike) -> Path:
+        """
+        Save raw bytes to a specific path.
+
+        - Creates parent directories if needed.
+        - Returns the resolved Path actually written.
+        """
+        path = cls._to_path(file_path)
+        cls._ensure_parent_dir(path)
+        path.write_bytes(data)
+        return path
+
+    @classmethod
+    def save_local(
+        cls,
+        data: bytes,
+        subdirectory: str | None = None,
+        name: str | None = None,
+        extension: str | None = None,
+    ) -> Path:
+        """
+        Build a local file path via local_file() and save raw bytes there.
+        """
+        path = cls.local_file(subdirectory=subdirectory, name=name, extension=extension)
+        return cls.save(data, path)
+
+
+
+# ===== file_utils.py =====
+
+# file_utils.py
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+from pathlib import Path
+from typing import Optional
+
+from filesystem.file_io import FileIO
+from image.bitmap import Bitmap
+from PIL import Image
+
+if TYPE_CHECKING:
+    # Only imported for type checkers / IDEs, not at runtime
+    from image.bitmap import Bitmap
+
+class FileUtils:
+
+    # ================================================================
+    # TEXT UTILITIES
+    # ================================================================
+
+    @classmethod
+    def load_text(cls, file_path: Path, encoding: str = "utf-8") -> str:
+        data = FileIO.load(file_path)
+        return data.decode(encoding)
+
+    @classmethod
+    def load_local_text(cls, subdirectory: Optional[str], name: str, extension: str, encoding="utf-8") -> str:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.load_text(path, encoding)
+
+    @classmethod
+    def save_text(cls, text: str, file_path: Path, encoding: str = "utf-8") -> Path:
+        data = text.encode(encoding)
+        return FileIO.save(data, file_path)
+
+    @classmethod
+    def save_local_text(cls, text: str, subdirectory: Optional[str], name: str, extension: str, encoding="utf-8") -> Path:
+        data = text.encode(encoding)
+        return FileIO.save_local(data, subdirectory, name, extension)
+
+    # ================================================================
+    # IMAGE UTILITIES
+    # ================================================================
+
+    @classmethod
+    def load_image(cls, file_path: Path) -> Image.Image:
+        path = Path(file_path).resolve()
+        if path.is_file():
+            image = Image.open(path)
+            if image is not None:
+                image.load()
+                if image.width > 0 and image.height > 0:
+                    return image
+        base = path.with_suffix("")
+        for extension in [".png", ".PNG", ".jpg", ".JPG", ".jpeg", ".JPEG", ".tif", ".tiff"]:
+            attempt_path = base.with_suffix(extension)
+            if attempt_path.is_file():
+                image = Image.open(attempt_path)
+                if image is not None:
+                    image.load()
+                    if image.width > 0 and image.height > 0:
+                        return image
+        raise FileNotFoundError(f"Image not found: {path}")
+    
+    @classmethod
+    def load_bitmap(cls, file_path: Path) -> Bitmap:
+        image = cls.load_image(file_path)
+        bitmap = Bitmap()
+        bitmap.import_pillow(image)
+        return bitmap
+
+    @classmethod
+    def load_local_image(cls, subdirectory: Optional[str], name: str, extension=None) -> Image.Image:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.load_image(path)
+    
+    @classmethod
+    def load_local_bitmap(cls, subdirectory: Optional[str], name: str, extension=None) -> Bitmap:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.load_bitmap(path)
+
+    @classmethod
+    def save_image(cls, image: Image.Image, file_path: Path) -> Path:
+        path = Path(file_path).resolve()
+        FileIO._ensure_parent_dir(path)
+        image.save(path)
+        return path
+
+    @classmethod
+    def save_local_image(cls, image: Image.Image, subdirectory: Optional[str], name: str, extension="png") -> Path:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.save_image(image, path)
+    
+    @classmethod
+    def save_local_bitmap(cls, bitmap: Optional[Bitmap], subdirectory: Optional[str], name: str, extension="png") -> Path:
+        path = FileIO.local_file(subdirectory, name, extension)
+        return cls.save_image(bitmap.export_pillow(), path)
 
 
 

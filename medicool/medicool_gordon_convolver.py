@@ -12,17 +12,47 @@ from labels.image_annotation_document import ImageAnnotationDocument
 
 from image_tools.mask_loader import load_mask_white_xy_weights
 from image.bitmap import Bitmap
+from image.convolve_padding_mode import ConvolvePaddingMode
+
+from image.convolve_padding_mode import (
+    ConvolvePaddingMode,
+    ConvolvePaddingSame,
+    ConvolvePaddingValid,
+    ConvolvePaddingOffsetSame,
+    ConvolvePaddingOffsetValid,
+)
 
 class MedicoolGordonConvolver:
 
+    # NOTE: trim no longer used by Bitmap.convolve (Torch-like SAME/VALID now handles borders)
     TRIM_H = 16
-    TRIM_V = 32  # keep this different for verify test
+    TRIM_V = 32  # keep this different for verify test (still used by label section for now)
 
     KERNEL_SUBDIR = "images"
-    #KERNEL_FILE = "good_egg_kernel_red_5_9.png"
-    KERNEL_FILE = "stripe_kernel_red_7_1.png"
-    
+    KERNEL_FILE = "good_egg_kernel_red_5_9.png"
+    #KERNEL_FILE = "stripe_kernel_red_7_1.png"
+
     OUTPUT_SUFFIX = "_gor"  # gordon chase, street farmer commando (extaordinary demon slayer)
+
+    # ------------------------------------------------------------
+    # New Torch-ish convolve params (spicy defaults)
+    # ------------------------------------------------------------
+    STRIDE_H = 1
+    STRIDE_V = 2
+    
+    DILATION_H = 1
+    DILATION_V = 1
+
+    # SAME uses padding; VALID assumes no padding.
+    PADDING_MODE = ConvolvePaddingOffsetValid(60, 60)
+
+    # Offsets: only Torch 1:1 match when both are 0
+    OFFSET_X = 0
+    OFFSET_Y = 0
+
+    # Padding fill to match Torch (zeros everywhere). If your Bitmap expects opaque,
+    # change this in Bitmap.convolve, not here.
+    # (Convolver doesn't need explicit padding value; Bitmap handles it.)
 
     @classmethod
     def execute(
@@ -34,7 +64,7 @@ class MedicoolGordonConvolver:
         destination_image_subdir: str,
         destination_label_subdir: str,
     ) -> Tuple[List[str], List[str]]:
-        
+
         out_image_files: List[str] = []
         out_label_files: List[str] = []
         failed_images: List[str] = []
@@ -56,7 +86,6 @@ class MedicoolGordonConvolver:
         # ------------------------------------------------------------
         for source_image_file_name in source_image_file_names:
             try:
-                # load bitmap from local file scheme
                 bmp = Bitmap.with_local_image(
                     subdirectory=source_image_subdir,
                     name=source_image_file_name,
@@ -65,17 +94,17 @@ class MedicoolGordonConvolver:
 
                 convolved = bmp.convolve(
                     mask=mask,
-                    trim_h=cls.TRIM_H,
-                    trim_v=cls.TRIM_V,
-                    offset_x=0,
-                    offset_y=0
+                    offset_x=cls.OFFSET_X,
+                    offset_y=cls.OFFSET_Y,
+                    stride_h=cls.STRIDE_H,
+                    stride_v=cls.STRIDE_V,
+                    dilation_h=cls.DILATION_H,
+                    dilation_v=cls.DILATION_V,
+                    padding_mode=cls.PADDING_MODE,
                 )
 
                 new_file_name = FileUtils.append_file_suffix(source_image_file_name, cls.OUTPUT_SUFFIX)
 
-                # FileUtils.save_local_bitmap wants name WITHOUT extension (it appends extension)
-                # but your new_file_name might already include ".png".
-                # So we save using the exact filename by passing extension=None and name including ext.
                 FileUtils.save_local_bitmap(
                     convolved,
                     subdirectory=destination_image_subdir,
@@ -92,10 +121,11 @@ class MedicoolGordonConvolver:
         # ------------------------------------------------------------
         # Labels: shift + clip -> save
         # ------------------------------------------------------------
+        # NOTE: This label logic is still TRIM-based. Since convolve no longer trims,
+        # you'll likely change this next once you decide how labels should transform
+        # under SAME/VALID + stride/dilation/offset.
         for source_label_file_name in source_label_file_names:
             try:
-                # from_local_file expects 'name' without extension when extension is provided.
-                # Here we pass extension=None, so name can include ".json" and still work.
                 document = ImageAnnotationDocument.from_local_file(
                     subdirectory=source_label_subdir,
                     name=source_label_file_name,
@@ -105,7 +135,10 @@ class MedicoolGordonConvolver:
                 new_w = document.width - (cls.TRIM_H * 2)
                 new_h = document.height - (cls.TRIM_V * 2)
                 if new_w <= 0 or new_h <= 0:
-                    raise ValueError(f"Trim produced non-positive size: ({new_w},{new_h}) from ({document.width},{document.height})")
+                    raise ValueError(
+                        f"Trim produced non-positive size: ({new_w},{new_h}) "
+                        f"from ({document.width},{document.height})"
+                    )
 
                 new_document = ImageAnnotationDocument(
                     name=document.name,
@@ -128,8 +161,6 @@ class MedicoolGordonConvolver:
 
                 new_file_name = FileUtils.append_file_suffix(source_label_file_name, cls.OUTPUT_SUFFIX)
 
-                # Save JSON. FileUtils.save_local_json expects name without extension if extension provided.
-                # We want to preserve existing extension if present; append_file_suffix preserves it.
                 FileUtils.save_local_json(
                     new_document.to_json(),
                     subdirectory=destination_label_subdir,
@@ -157,5 +188,15 @@ class MedicoolGordonConvolver:
             print("   Failed labels:")
             for f in failed_labels:
                 print(f"   - {f}")
+
+        # Helpful run summary of convolve params
+        print(
+            "✅ GordonConvolver convolve params: "
+            f"padding_mode={Bitmap.padding_mode_string(cls.PADDING_MODE)} "
+            f"stride=({cls.STRIDE_H},{cls.STRIDE_V}) "
+            f"dilation=({cls.DILATION_H},{cls.DILATION_V}) "
+            f"offset=({cls.OFFSET_X},{cls.OFFSET_Y}) "
+            f"kernel={cls.KERNEL_FILE}"
+        )
 
         return out_image_files, out_label_files

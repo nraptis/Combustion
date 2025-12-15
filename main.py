@@ -36,7 +36,7 @@ def main() -> None:
     training_label_file_names = MedicoolDataBank.get_training_file_info()
 
 
-    
+    """
     sveta_img_out = "sveta_image"
     sveta_lbl_out = "sveta_anno"
     sveta_msks_out = "sveta_masks"
@@ -75,6 +75,9 @@ def main() -> None:
                                     gordon_img_out,
                                     gordon_lbl_out)
 
+    return
+
+    """
     print("out_image_files", image_files)
     print("out_label_files", label_files)
 
@@ -86,6 +89,7 @@ def main() -> None:
     minimum_digit_count=3,
     )
     """
+    
     
     print(sys.executable)
 
@@ -100,6 +104,7 @@ def main() -> None:
     FileUtils.save_local_bitmap(out2, "convo_test", "convolutes")
     
 
+    
 
     #print("=== runner_torch ===")
     #runner_torch()

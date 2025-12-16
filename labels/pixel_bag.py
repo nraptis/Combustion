@@ -4,6 +4,8 @@ from typing import Any, List, Optional
 from labels.pixel_bag_run_length import PixelBagRunLength
 from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
 from image.bitmap import Bitmap
+from image.convolve_kernel_alignment import ConvolveKernelAlignment
+from image.convolve_padding_mode import ConvolvePaddingMode, ConvolvePaddingValid
 
 class PixelBag:
     """
@@ -234,42 +236,89 @@ class PixelBag:
             for x in range(stripe.x_start, stripe.x_end + 1):
                 bag.add(x, y)
         return bag
-    
     @classmethod
-    def transforming_with_convolve(
+    def transform_with_convolve(
         cls,
         pixel_bag: Optional["PixelBag"],
         mask: List[List[float]],
         image_width: int,
         image_height: int,
-        trim_h: int,
-        trim_v: int,
-        offset_x: int = 0,
-        offset_y: int = 0) -> Optional["PixelBag"]:
+        stride_h: int = 1,
+        stride_v: int = 1,
+        dilation_h: int = 1,
+        dilation_v: int = 1,
+        kernel_alignment: ConvolveKernelAlignment = ConvolveKernelAlignment.CENTER,
+        padding_mode: ConvolvePaddingMode = ConvolvePaddingValid(),
+    ) -> Optional["PixelBag"]:
+        """
+        Transform a PixelBag from SOURCE coords into OUTPUT coords for the convolution output space.
 
+        Uses Bitmap.convolve_frame_mask() to compute:
+          (anchor_x_src, anchor_y_src, out_w, out_h)
+
+        Where (anchor_x_src, anchor_y_src) is the SOURCE-space coordinate of the chosen kernel anchor
+        for output pixel (0,0). For output (ox,oy), the anchor is:
+          anchor_x_src + ox*stride_h
+          anchor_y_src + oy*stride_v
+
+        This does NOT change Bitmap.convolve() results; it only maps label coordinates.
+        """
         if pixel_bag is None or len(pixel_bag) == 0:
             return None
 
         W = int(image_width)
         H = int(image_height)
+        sh = int(stride_h)
+        sv = int(stride_v)
+        dh = int(dilation_h)
+        dv = int(dilation_v)
 
-        # STRICT: will raise if invalid / OOB / non-positive output
-        start_x, start_y, out_w, out_h = Bitmap.convolve_frame(
-            W, H, mask, trim_h, trim_v, offset_x, offset_y
+        if W <= 0 or H <= 0:
+            return None
+        if sh <= 0 or sv <= 0:
+            return None
+        if dh <= 0 or dv <= 0:
+            return None
+
+        anchor_x_src, anchor_y_src, out_w, out_h = Bitmap.convolve_frame_mask(
+            image_width=W,
+            image_height=H,
+            mask=mask,
+            offset_x=0,
+            offset_y=0,
+            stride_h=sh,
+            stride_v=sv,
+            dilation_h=dh,
+            dilation_v=dv,
+            kernel_alignment=kernel_alignment,
+            padding_mode=padding_mode,
         )
+        if out_w <= 0 or out_h <= 0:
+            return None
+
+        ax0 = int(anchor_x_src)
+        ay0 = int(anchor_y_src)
 
         result = PixelBag()
 
-        # PixelBag is in SOURCE coords. Convolved bitmap is in OUTPUT coords.
-        # Output (0,0) corresponds to source base at (start_x, start_y).
-        for (x, y) in pixel_bag:
-            nx = int(x) - int(start_x)
-            ny = int(y) - int(start_y)
-            if 0 <= nx < out_w and 0 <= ny < out_h:
-                result.add(nx, ny)
+        # Map each SOURCE pixel to an OUTPUT cell on the stride lattice.
+        # Multiple source pixels can collapse to the same output pixel when stride>1 (fine).
+        for (x0, y0) in pixel_bag:
+            x = int(x0)
+            y = int(y0)
+
+            dx = x - ax0
+            dy = y - ay0
+
+            # floor division maps to the output index whose anchor is <= (x,y)
+            ox = dx // sh
+            oy = dy // sv
+
+            if 0 <= ox < out_w and 0 <= oy < out_h:
+                result.add(int(ox), int(oy))
 
         return result if len(result) > 0 else None
-        
+    
     @classmethod
     def transforming_with_pool(
         cls,

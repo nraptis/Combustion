@@ -11,6 +11,8 @@ import torch
 import torch.nn.functional as F
 from image.pooling_mode import PoolingMode
 
+from image.convolve_kernel_alignment import ConvolveKernelAlignment
+
 from image.convolve_padding_mode import (
     ConvolvePaddingMode,
     ConvolvePaddingSame,
@@ -473,6 +475,7 @@ class Bitmap:
         stride_v: int = 1,
         dilation_h: int = 1,
         dilation_v: int = 1,
+        kernel_alignment: ConvolveKernelAlignment = ConvolveKernelAlignment.CENTER,
         padding_mode: ConvolvePaddingMode = ConvolvePaddingValid(),
     ) -> Tuple[int, int, int, int]:
         W = int(image_width)
@@ -488,16 +491,12 @@ class Bitmap:
         dv = int(dilation_v)
 
         if W <= 0 or H <= 0:
-            # print("❌ convolve_frame: whiff (invalid image size)")
             return (0, 0, 0, 0)
         if kw <= 0 or kh <= 0:
-            # print("❌ convolve_frame: whiff (kernel must be >= 1)")
             return (0, 0, 0, 0)
         if sh <= 0 or sv <= 0:
-            # print("❌ convolve_frame: whiff (stride must be >= 1)")
             return (0, 0, 0, 0)
         if dh <= 0 or dv <= 0:
-            # print("❌ convolve_frame: whiff (dilation must be >= 1)")
             return (0, 0, 0, 0)
 
         # Effective kernel footprint under dilation
@@ -505,8 +504,7 @@ class Bitmap:
         k_eff_h = (kh - 1) * dv + 1
 
         # --------------------------------------------------
-        # OFFSET contract enforcement + compute "base" shift
-        # base shift is what makes negative offsets legal and aligned.
+        # OFFSET contract enforcement + base shift
         # --------------------------------------------------
         base_x = 0
         base_y = 0
@@ -515,43 +513,33 @@ class Bitmap:
 
         is_offset_mode = isinstance(padding_mode, (ConvolvePaddingOffsetSame, ConvolvePaddingOffsetValid))
         if (ox != 0 or oy != 0) and not is_offset_mode:
-            # print("❌ convolve_frame: whiff (non-zero offset requires ConvolvePaddingOffsetSame/Valid)")
             return (0, 0, 0, 0)
 
         if is_offset_mode:
             max_ox = int(padding_mode.max_offset_x)
             max_oy = int(padding_mode.max_offset_y)
             if max_ox < 0 or max_oy < 0:
-                # print("❌ convolve_frame: whiff (max_offset must be >= 0)")
                 return (0, 0, 0, 0)
             if abs(ox) > max_ox or abs(oy) > max_oy:
-                """
-                print(
-                    "❌ convolve_frame: whiff (offset exceeds max_offset) "
-                    f"offset=({ox},{oy}) max=({max_ox},{max_oy})"
-                )
-                """
                 return (0, 0, 0, 0)
 
-            # This is the key alignment trick:
-            # treat offset as sampling shift around a center budget.
             base_x = max_ox
             base_y = max_oy
 
-        # Budgeted footprint (your “like a bigger kernel” rule)
+        # Budgeted footprint (offset expands footprint)
         k_budget_w = k_eff_w + 2 * max_ox
         k_budget_h = k_eff_h + 2 * max_oy
 
         # --------------------------------------------------
-        # Compute output + padding (Torch-ish)
+        # Output + padding (Torch-ish sizing)
         # --------------------------------------------------
         pad_left = pad_right = pad_top = pad_bottom = 0
 
-        if isinstance(padding_mode, (ConvolvePaddingSame, ConvolvePaddingOffsetSame)):
+        is_same = isinstance(padding_mode, (ConvolvePaddingSame, ConvolvePaddingOffsetSame))
+        if is_same:
             out_w = cls._ceil_div(W, sh)
             out_h = cls._ceil_div(H, sv)
 
-            # SAME padding sized from budgeted footprint so any allowed offset stays safe
             pad_total_w = max(0, (out_w - 1) * sh + k_budget_w - W)
             pad_total_h = max(0, (out_h - 1) * sv + k_budget_h - H)
 
@@ -559,53 +547,51 @@ class Bitmap:
             pad_right = pad_total_w - pad_left
             pad_top = pad_total_h // 2
             pad_bottom = pad_total_h - pad_top
-
         else:
-            # VALID (including offset-valid): no padding; output shrinks based on budgeted footprint
+            # VALID (including offset-valid)
             if W < k_budget_w or H < k_budget_h:
-                """
-                print(
-                    "❌ convolve_frame: whiff (VALID kernel footprint larger than image) "
-                    f"image=({W},{H}) footprint=({k_budget_w},{k_budget_h})"
-                )
-                """
                 return (0, 0, 0, 0)
 
             out_w = (W - k_budget_w) // sh + 1
             out_h = (H - k_budget_h) // sv + 1
 
         if out_w <= 0 or out_h <= 0:
-            # print("❌ convolve_frame: whiff (non-positive output size)")
             return (0, 0, 0, 0)
 
         padded_w = W + pad_left + pad_right
         padded_h = H + pad_top + pad_bottom
 
         # --------------------------------------------------
-        # Bounds check in padded (or unpadded) space
-        # Sample coordinate:
-        #   x = (base_x + ox) + out_x*sh + kx*dh
-        #   y = (base_y + oy) + out_y*sv + ky*dv
+        # IMPORTANT: sampling start is ALWAYS TOP_LEFT.
+        # This matches Bitmap.convolve() exactly.
         # --------------------------------------------------
         start_x0 = base_x + ox
         start_y0 = base_y + oy
 
+        # Bounds check for the TOP_LEFT sampler
         min_x = start_x0
         min_y = start_y0
         max_x = start_x0 + (out_w - 1) * sh + (kw - 1) * dh
         max_y = start_y0 + (out_h - 1) * sv + (kh - 1) * dv
 
         if min_x < 0 or min_y < 0 or max_x >= padded_w or max_y >= padded_h:
-            """
-            print(
-                "❌ convolve_frame: whiff (sampling footprint OOB) "
-                f"needed x:[{min_x},{max_x}] y:[{min_y},{max_y}] "
-                f"padded=({padded_w},{padded_h})"
-            )
-            """
             return (0, 0, 0, 0)
 
-        return (0, 0, int(out_w), int(out_h))
+        # --------------------------------------------------
+        # Now: report the chosen anchor position in SOURCE coords.
+        # (this does NOT affect validity or sampling)
+        # In padded space, anchor = start + (ax,ay)*dilation
+        # In source space, subtract SAME padding shift.
+        # --------------------------------------------------
+        ax, ay = ConvolveKernelAlignment.anchor(kernel_alignment, kw, kh)
+
+        anchor_x0 = start_x0 + ax * dh
+        anchor_y0 = start_y0 + ay * dv
+
+        anchor_x_src = anchor_x0 - pad_left
+        anchor_y_src = anchor_y0 - pad_top
+
+        return (int(anchor_x_src), int(anchor_y_src), int(out_w), int(out_h))
     
     @classmethod
     def convolve_frame_mask(
@@ -619,24 +605,21 @@ class Bitmap:
         stride_v: int = 1,
         dilation_h: int = 1,
         dilation_v: int = 1,
+        kernel_alignment: ConvolveKernelAlignment = ConvolveKernelAlignment.CENTER,
         padding_mode: ConvolvePaddingMode = ConvolvePaddingValid(),
     ) -> Tuple[int, int, int, int]:
         if mask is None:
-            #print("❌ convolve_frame_mask: whiff (mask is None)")
             return (0, 0, 0, 0)
 
         kw = len(mask)
         if kw <= 0:
-            #print("❌ convolve_frame_mask: whiff (mask width=0)")
             return (0, 0, 0, 0)
 
         col0 = mask[0]
         kh = len(col0) if col0 is not None else 0
         if kh <= 0:
-            #print("❌ convolve_frame_mask: whiff (mask height=0)")
             return (0, 0, 0, 0)
 
-        # Per request: no full rectangular validation here.
         return cls.convolve_frame(
             image_width=image_width,
             image_height=image_height,
@@ -648,6 +631,7 @@ class Bitmap:
             stride_v=stride_v,
             dilation_h=dilation_h,
             dilation_v=dilation_v,
+            kernel_alignment=kernel_alignment,
             padding_mode=padding_mode,
         )
     
@@ -662,7 +646,7 @@ class Bitmap:
         dilation_v: int = 1,
         padding_mode: ConvolvePaddingMode = ConvolvePaddingValid(),
     ) -> "Bitmap":
-        # Frame is NON-THROWING and prints ❌ on whiff.
+        # Frame is NON-THROWING. We ignore (x,y) and always request TOP_LEFT.
         _, _, out_w, out_h = Bitmap.convolve_frame_mask(
             self.width,
             self.height,
@@ -673,6 +657,7 @@ class Bitmap:
             stride_v=stride_v,
             dilation_h=dilation_h,
             dilation_v=dilation_v,
+            kernel_alignment=ConvolveKernelAlignment.TOP_LEFT,
             padding_mode=padding_mode,
         )
         if out_w <= 0 or out_h <= 0:
@@ -694,7 +679,7 @@ class Bitmap:
         k_eff_w = (kw - 1) * dh + 1
         k_eff_h = (kh - 1) * dv + 1
 
-        # OFFSET contract + base shift
+        # OFFSET base shift (same as before)
         base_x = 0
         base_y = 0
         max_ox = 0
@@ -709,9 +694,9 @@ class Bitmap:
         k_budget_w = k_eff_w + 2 * max_ox
         k_budget_h = k_eff_h + 2 * max_oy
 
-        # Padding for SAME modes
-        pad_left = pad_right = pad_top = pad_bottom = 0
-        if isinstance(padding_mode, (ConvolvePaddingSame, ConvolvePaddingOffsetSame)):
+        # SAME padding build (unchanged)
+        is_same = isinstance(padding_mode, (ConvolvePaddingSame, ConvolvePaddingOffsetSame))
+        if is_same:
             out_w_same = Bitmap._ceil_div(W, sh)
             out_h_same = Bitmap._ceil_div(H, sv)
 
@@ -723,20 +708,15 @@ class Bitmap:
             pad_top = pad_total_h // 2
             pad_bottom = pad_total_h - pad_top
 
-            # Build padded bitmap using stamp
             padded = Bitmap(W + pad_left + pad_right, H + pad_top + pad_bottom)
-            padded.flood(RGBA(0, 0, 0, 0))          # Torch-ish padding
-            padded.stamp(self, pad_left, pad_top)   # reuse stamp
+            padded.flood(RGBA(0, 0, 0, 0))
+            padded.stamp(self, pad_left, pad_top)
 
             src_f = padded.export_opencv().astype(np.float32, copy=False)
 
-            # Sampling start in padded coords (base + offset)
             start_x0 = base_x + ox
             start_y0 = base_y + oy
-
         else:
-            # VALID modes: no padding bitmap, sample directly from source
-            # (base shift makes negative offsets legal without padding by shrinking output via budget)
             src_f = self.export_opencv().astype(np.float32, copy=False)
 
             start_x0 = base_x + ox
@@ -751,7 +731,7 @@ class Bitmap:
 
         acc = np.zeros((out_h, out_w, 4), dtype=np.float32)
 
-        # Vectorized gather per tap with stride/dilation
+        # TOP_LEFT sampling only (unchanged)
         for ky in range(kh):
             sy0 = start_y0 + ky * dv
             sy1 = sy0 + out_h * sv
@@ -767,6 +747,8 @@ class Bitmap:
         result = Bitmap(out_w, out_h)
         result.import_opencv(out_u8)
         return result
+
+
 
     # --------------------------------------------------
     # Pooling frame helper (STRICT)

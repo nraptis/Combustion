@@ -1,0 +1,51 @@
+{
+  "name": "test_0007",
+  "width": 8,
+  "height": 8,
+  "data_label_names": [
+    "germ",
+    "virus"
+  ],
+  "labels": [
+    {
+      "name": "germ",
+      "pixels": [
+        {
+          "y": 0,
+          "x_start": 4,
+          "x_end": 4
+        },
+        {
+          "y": 1,
+          "x_start": 3,
+          "x_end": 5
+        },
+        {
+          "y": 2,
+          "x_start": 4,
+          "x_end": 4
+        }
+      ]
+    },
+    {
+      "name": "virus",
+      "pixels": [
+        {
+          "y": 4,
+          "x_start": 2,
+          "x_end": 2
+        },
+        {
+          "y": 5,
+          "x_start": 1,
+          "x_end": 3
+        },
+        {
+          "y": 6,
+          "x_start": 2,
+          "x_end": 2
+        }
+      ]
+    }
+  ]
+}

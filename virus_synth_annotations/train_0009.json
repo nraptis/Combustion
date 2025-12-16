@@ -1,0 +1,51 @@
+{
+  "name": "train_0009",
+  "width": 8,
+  "height": 8,
+  "data_label_names": [
+    "germ",
+    "virus"
+  ],
+  "labels": [
+    {
+      "name": "germ",
+      "pixels": [
+        {
+          "y": 2,
+          "x_start": 4,
+          "x_end": 4
+        },
+        {
+          "y": 3,
+          "x_start": 3,
+          "x_end": 5
+        },
+        {
+          "y": 4,
+          "x_start": 4,
+          "x_end": 4
+        }
+      ]
+    },
+    {
+      "name": "virus",
+      "pixels": [
+        {
+          "y": 0,
+          "x_start": 6,
+          "x_end": 6
+        },
+        {
+          "y": 1,
+          "x_start": 5,
+          "x_end": 7
+        },
+        {
+          "y": 2,
+          "x_start": 6,
+          "x_end": 6
+        }
+      ]
+    }
+  ]
+}

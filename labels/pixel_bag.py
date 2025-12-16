@@ -1,12 +1,124 @@
 # pixel_bag.py
 from __future__ import annotations
-from typing import Any, List, Optional
-from labels.pixel_bag_run_length import PixelBagRunLength
-from labels.pixel_bag_run_length_stripe import PixelBagRunLengthStripe
+import numpy as np
+from typing import Any, Dict, Iterable, List, Optional
+from dataclasses import dataclass
+from image.rgba import RGBA
 from image.bitmap import Bitmap
 from image.convolve_kernel_alignment import ConvolveKernelAlignment
 from image.convolve_padding_mode import ConvolvePaddingMode, ConvolvePaddingValid
 
+@dataclass
+class PixelBagRunLengthStripe:
+    """
+    Represents a horizontal run of pixels at a fixed y:
+        x in [x_start, x_end] inclusive.
+    """
+    y: int
+    x_start: int
+    x_end: int
+
+    def to_json(self) -> Dict[str, Any]:
+        """
+        Serialize this stripe to a JSON-compatible dict.
+        """
+        return {
+            "y": int(self.y),
+            "x_start": int(self.x_start),
+            "x_end": int(self.x_end),
+        }
+
+    @staticmethod
+    def from_json(data: Dict[str, Any]) -> "PixelBagRunLengthStripe":
+        """
+        Deserialize a stripe from a JSON-compatible dict.
+        Expects keys: "y", "x_start", "x_end".
+        """
+        return PixelBagRunLengthStripe(
+            y=int(data["y"]),
+            x_start=int(data["x_start"]),
+            x_end=int(data["x_end"]),
+        )
+
+    # --------------------------------------------------
+    # Debug / printing helpers
+    # --------------------------------------------------
+    def repr_str(self, indent: int = 0) -> str:
+        """
+        Return a single-line string representation, with leading tabs
+        based on indent depth.
+        """
+        prefix = "\t" * max(indent, 0)
+        return f"{prefix}(y={self.y}, x_start={self.x_start}, x_end={self.x_end})"
+
+    def __repr__(self) -> str:
+        """
+        Default repr with no indentation.
+        """
+        return self.repr_str(indent=0)
+    
+
+class PixelBagRunLength:
+    """
+    Run-length representation of a PixelBag:
+    a list of horizontal stripes.
+    """
+
+    def __init__(self, stripes: List[PixelBagRunLengthStripe] | None = None) -> None:
+        self.stripes: List[PixelBagRunLengthStripe] = stripes or []
+
+    # --------------------------------------------------
+    # JSON serialization
+    # --------------------------------------------------
+    def to_json(self) -> List[Any]:
+        return [stripe.to_json() for stripe in self.stripes]
+
+    @staticmethod
+    def from_json(data: List[Any]) -> "PixelBagRunLength":
+        stripes = [PixelBagRunLengthStripe.from_json(item) for item in data]
+        return PixelBagRunLength(stripes=stripes)
+
+    # --------------------------------------------------
+    # Utility
+    # --------------------------------------------------
+    def add_stripe(self, stripe: PixelBagRunLengthStripe) -> None:
+        self.stripes.append(stripe)
+
+    def __len__(self) -> int:
+        return len(self.stripes)
+
+    def __iter__(self):
+        return iter(self.stripes)
+
+    # -------- central sorting helper --------
+    @staticmethod
+    def sorted_stripes(
+        stripes: Iterable[PixelBagRunLengthStripe],
+    ) -> List[PixelBagRunLengthStripe]:
+        return sorted(stripes, key=lambda s: (s.y, s.x_start))
+
+    def sorted(self) -> List[PixelBagRunLengthStripe]:
+        return PixelBagRunLength.sorted_stripes(self.stripes)
+
+    # --------------------------------------------------
+    # One-line summary repr
+    # --------------------------------------------------
+    def __repr__(self) -> str:
+        """
+        Compact one-line summary:
+        PixelBagRunLength(count=3, stripes=[Stripe(y=10,3→5), Stripe(y=11,7→7)])
+        """
+        if not self.stripes:
+            return "PixelBagRunLength(count=0, stripes=[])"
+
+        parts = []
+        for s in self.sorted():
+            parts.append(f"Stripe(y={s.y},{s.x_start}→{s.x_end})")
+
+        stripes_str = ", ".join(parts)
+        return f"PixelBagRunLength(count={len(self.stripes)}, stripes=[{stripes_str}])"
+
+    
 class PixelBag:
     """
     Stores a set of (x, y) integer pixel positions.
@@ -181,11 +293,7 @@ class PixelBag:
             f"median=({mx}, {my}), "
             f"size=({w}, {h}))"
         )
-
-
-    # --------------------------------------------------
-    # Run-length conversion
-    # --------------------------------------------------
+    
     def to_run_length(self) -> "PixelBagRunLength":
         result = PixelBagRunLength()
 
@@ -208,10 +316,7 @@ class PixelBag:
                 else:
                     x += 1
         return result
-
-    # --------------------------------------------------
-    # JSON serialization
-    # --------------------------------------------------
+    
     def to_json(self) -> List[Any]:
         """
         Serialize this PixelBag to a JSON-compatible list of run-length
@@ -236,13 +341,77 @@ class PixelBag:
             for x in range(stripe.x_start, stripe.x_end + 1):
                 bag.add(x, y)
         return bag
+    
+    def stamp_bitmap(
+        self,
+        bitmap: Optional[Bitmap],
+        data_label_color: Optional[RGBA] = None,
+    ) -> None:
+        """
+        Dumb stamp:
+        - Writes RGB only
+        - Does NOT touch alpha
+        - Safe bounds
+        - No blending, no aliasing
+        """
+        if bitmap is None:
+            return
+
+        W = int(bitmap.width)
+        H = int(bitmap.height)
+        if W <= 0 or H <= 0:
+            return
+        if len(self) == 0:
+            return
+
+        fg = data_label_color if isinstance(data_label_color, RGBA) else RGBA(255, 255, 255, 255)
+
+        r = int(fg.ri)
+        g = int(fg.gi)
+        b = int(fg.bi)
+        a = int(fg.ai)
+        
+
+        for (x0, y0) in self:
+            x = int(x0)
+            y = int(y0)
+            if 0 <= x < W and 0 <= y < H:
+                px = bitmap.rgba[x][y]
+                px.ri = r
+                px.gi = g
+                px.bi = b
+                px.ai = a
+    
+    def to_bitmap(
+        self,
+        image_width: int,
+        image_height: int,
+        data_label_color: Optional[RGBA] = None,
+        background_color: Optional[RGBA] = None,
+    ) -> Optional[Bitmap]:
+
+        W = int(image_width)
+        H = int(image_height)
+        if W <= 0 or H <= 0:
+            return None
+
+        bg = background_color if isinstance(background_color, RGBA) else RGBA(0, 0, 0, 0)
+
+        bmp = Bitmap(W, H)
+        bmp.flood(bg)
+
+        self.stamp_bitmap(bmp, data_label_color=data_label_color)
+        return bmp
+    
     @classmethod
-    def transform_with_convolve(
+    def transformed_with_convolve(
         cls,
         pixel_bag: Optional["PixelBag"],
         mask: List[List[float]],
         image_width: int,
         image_height: int,
+        offset_x: int = 0,
+        offset_y: int = 0,
         stride_h: int = 1,
         stride_v: int = 1,
         dilation_h: int = 1,
@@ -250,46 +419,20 @@ class PixelBag:
         kernel_alignment: ConvolveKernelAlignment = ConvolveKernelAlignment.CENTER,
         padding_mode: ConvolvePaddingMode = ConvolvePaddingValid(),
     ) -> Optional["PixelBag"]:
-        """
-        Transform a PixelBag from SOURCE coords into OUTPUT coords for the convolution output space.
 
-        Uses Bitmap.convolve_frame_mask() to compute:
-          (anchor_x_src, anchor_y_src, out_w, out_h)
-
-        Where (anchor_x_src, anchor_y_src) is the SOURCE-space coordinate of the chosen kernel anchor
-        for output pixel (0,0). For output (ox,oy), the anchor is:
-          anchor_x_src + ox*stride_h
-          anchor_y_src + oy*stride_v
-
-        This does NOT change Bitmap.convolve() results; it only maps label coordinates.
-        """
         if pixel_bag is None or len(pixel_bag) == 0:
             return None
 
-        W = int(image_width)
-        H = int(image_height)
-        sh = int(stride_h)
-        sv = int(stride_v)
-        dh = int(dilation_h)
-        dv = int(dilation_v)
-
-        if W <= 0 or H <= 0:
-            return None
-        if sh <= 0 or sv <= 0:
-            return None
-        if dh <= 0 or dv <= 0:
-            return None
-
         anchor_x_src, anchor_y_src, out_w, out_h = Bitmap.convolve_frame_mask(
-            image_width=W,
-            image_height=H,
+            image_width=int(image_width),
+            image_height=int(image_height),
             mask=mask,
-            offset_x=0,
-            offset_y=0,
-            stride_h=sh,
-            stride_v=sv,
-            dilation_h=dh,
-            dilation_v=dv,
+            offset_x=int(offset_x),     # ✅ was 0
+            offset_y=int(offset_y),     # ✅ was 0
+            stride_h=int(stride_h),
+            stride_v=int(stride_v),
+            dilation_h=int(dilation_h),
+            dilation_v=int(dilation_v),
             kernel_alignment=kernel_alignment,
             padding_mode=padding_mode,
         )
@@ -298,29 +441,23 @@ class PixelBag:
 
         ax0 = int(anchor_x_src)
         ay0 = int(anchor_y_src)
+        sh = int(stride_h)
+        sv = int(stride_v)
 
         result = PixelBag()
-
-        # Map each SOURCE pixel to an OUTPUT cell on the stride lattice.
-        # Multiple source pixels can collapse to the same output pixel when stride>1 (fine).
         for (x0, y0) in pixel_bag:
-            x = int(x0)
-            y = int(y0)
-
-            dx = x - ax0
-            dy = y - ay0
-
-            # floor division maps to the output index whose anchor is <= (x,y)
+            dx = int(x0) - ax0
+            dy = int(y0) - ay0
             ox = dx // sh
             oy = dy // sv
-
             if 0 <= ox < out_w and 0 <= oy < out_h:
-                result.add(int(ox), int(oy))
+                result.add(ox, oy)
 
         return result if len(result) > 0 else None
+
     
     @classmethod
-    def transforming_with_pool(
+    def transformed_with_pool(
         cls,
         pixel_bag: Optional["PixelBag"],
         image_width: int,
@@ -329,6 +466,8 @@ class PixelBag:
         kernel_height: int = 2,
         stride_h: int = 0,
         stride_v: int = 0) -> Optional["PixelBag"]:
+
+        #note, broken, old system
 
         if pixel_bag is None or len(pixel_bag) == 0:
             return None

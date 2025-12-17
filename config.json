@@ -1,0 +1,22 @@
+{
+  "seed": 1337,
+  "device": "auto",
+
+  "data_root": "./data",
+  "batch_size": 128,
+  "num_workers": 2,
+
+  "epochs": 10,
+  "lr": 0.001,
+  "weight_decay": 0.00001,
+
+  "model": {
+    "conv1_out": 24,
+    "conv2_out": 48,
+    "kernel_size": 3,
+    "dropout": 0.1
+  },
+
+  "log_every": 100,
+  "save_path": "./checkpoints/cifar24.pt"
+}
